@@ -1,34 +1,50 @@
 # mac-hotkeys
 
-Two small background agents that replace things Hammerspoon would otherwise be used for, without
-running Hammerspoon. Each is a single Swift file compiled to a tiny LSUIElement app and started by
-a LaunchAgent. No dock icon, no menu bar item, no UI at all.
+One small background agent that replaces things Hammerspoon would otherwise be used for, without
+running Hammerspoon. A tiny LSUIElement app started by a LaunchAgent, with a single event tap
+driving all three hotkeys. No dock icon, no menu bar item, no UI at all.
 
-| Tool | What it does |
+| Hotkey | What it does |
 |---|---|
-| [`focus-toggle`](focus-toggle/) | F6 (the moon key): **tap** toggles Do Not Disturb, **hold** turns on the "Nothing" Focus, and if any Focus is already on, either gesture turns it off. |
-| [`fullscreen-cycle`](fullscreen-cycle/) | ``Cmd+` `` cycles between windows of the front app, including ones fullscreened into their own Space (which macOS's built-in version skips). |
-| [`cmd-tab-switcher`](cmd-tab-switcher/) | Replaces the Cmd+Tab menu with one that lists **windows** instead of apps, previews each one, and orders them by where they actually are. |
-
-Each directory has its own README with install steps, required permissions, and design notes.
+| **F6** (moon key) | Tap toggles Do Not Disturb, hold turns on the "Nothing" Focus, and if any Focus is on, either gesture turns it off. |
+| **Cmd+`** | Cycles between windows of the front app, including ones fullscreened into their own Space (which macOS's built-in version skips). |
+| **Cmd+Tab** | A switcher listing **windows** instead of apps, with previews, ordered by where things actually are. |
 
 ```sh
-cd focus-toggle && ./install.sh
-cd ../fullscreen-cycle && ./install.sh
-cd ../cmd-tab-switcher && ./install.sh
+./install.sh
 ```
 
 ## Permissions
 
-All three agents need **Accessibility** and **Input Monitoring**. On top of that:
+One app, so permissions are granted once:
 
-- `focus-toggle` needs **Full Disk Access**, because the file that reports which Focus is
-  currently active is TCC-protected.
-- `cmd-tab-switcher` needs **Screen Recording** for the window previews. This one fails quietly:
-  without it the tiles render blank while everything else keeps working.
+- **Accessibility** — required for everything
+- **Screen Recording** — switcher previews only. Fails quietly: without it tiles render blank
+  while everything else keeps working, and `CGPreflightScreenCaptureAccess()` can even report
+  `true` while captures are being refused, so trust the tiles rather than the API.
+- **Full Disk Access** — reading which Focus is active, since that file is TCC-protected.
 
-Re-running `install.sh` rebuilds the binary, which changes its code signature and makes macOS
-forget these grants. After a rebuild you may need to toggle each permission off and back on.
+Input Monitoring is *not* needed in practice; Accessibility covers the event tap.
+
+### Signing, and why it matters
+
+Ad-hoc signatures change on every build, so macOS treats each rebuild as a different app: the
+Privacy & Security entry silently goes stale, showing as enabled while granting nothing. To keep
+grants across rebuilds, `install.sh` signs with a fixed identity if one exists. Create it once:
+
+```sh
+openssl req -x509 -newkey rsa:2048 -keyout /tmp/sk.pem -out ~/halvor-codesign.cer -days 3650 -nodes \
+  -subj "/CN=Halvor Local Codesign" \
+  -addext "basicConstraints=critical,CA:false" \
+  -addext "keyUsage=critical,digitalSignature" \
+  -addext "extendedKeyUsage=critical,codeSigning"
+openssl pkcs12 -export -out /tmp/id.p12 -inkey /tmp/sk.pem -in ~/halvor-codesign.cer \
+  -passout pass:tmp -legacy -macalg sha1 -name "Halvor Local Codesign"
+security import /tmp/id.p12 -k ~/Library/Keychains/login.keychain-db -P tmp -T /usr/bin/codesign -A
+security add-trusted-cert -r trustRoot -p codeSign -k ~/Library/Keychains/login.keychain-db ~/halvor-codesign.cer
+```
+
+No sudo needed: trusting it in the user domain is enough.
 
 ## tools/
 
@@ -51,8 +67,19 @@ tried. Briefly:
   are AMFI-restricted: claim one and the kernel kills the process at launch, omit it and the
   daemon refuses the request. Shortcuts' "Set Focus" action is the only way in, so `focus-toggle`
   shells out to three one-action Shortcuts.
-- **Switching Spaces** has no public API at all, so `fullscreen-cycle` calls SkyLight privately.
-  Symbols are resolved with `dlsym` so a future macOS renaming one degrades to a clean error.
+- **Switching Spaces** has no public API, so SkyLight is called privately. Symbols are resolved
+  with `dlsym` so a future macOS renaming one degrades to a clean error.
 - **Capturing a window on an inactive Space** is likewise impossible publicly, since an
-  unrendered Space returns nothing, so `cmd-tab-switcher` uses SkyLight's capture call. Taking
-  over Cmd+Tab itself works because a HID-level event tap sees the keystroke before the Dock.
+  unrendered Space returns nothing, so SkyLight's capture call is used. Taking over Cmd+Tab works
+  because a HID-level event tap sees the keystroke before the Dock.
+- **Leaving a fullscreen Space is the exception**: the private call must *not* be used for it.
+  Both `SLSManagedDisplaySetCurrentSpace` and `NSRunningApplication.activate()` leave the
+  fullscreen window on screen and draw the target window on top of it, rather than travelling to
+  the desktop. Only a Dock-style `NSWorkspace.openApplication` genuinely exits fullscreen, so
+  that is what the switcher uses for desktop targets.
+
+  Worth knowing if you ever debug this: neither `SLSGetActiveSpace` nor
+  `kCGWindowListOptionOnScreenOnly` can tell you what is really on screen. The first reports a
+  Space switch ~10ms in while the animation runs for ~400ms more, and the second lists windows
+  from other Spaces as "on screen". Both will happily report success while the screen shows
+  something else. Verify with a screenshot.

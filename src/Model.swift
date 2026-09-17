@@ -123,31 +123,35 @@ enum WindowLister {
                 CGRectMakeWithDictionaryRepresentation(boundsDict as CFDictionary, &rect)
             }
 
+            // Anything this small is a helper window, never something to switch to.
+            if rect.width < 200 || rect.height < 200 { continue }
+
             let space = sky.space(ofWindow: id)
             let minimized: Bool
-            if space == nil {
-                if minimizedCache[pid] == nil { minimizedCache[pid] = minimizedWindowIDs(ofPID: pid) }
-                minimized = minimizedCache[pid]!.contains(id)
-                // A window with no Space is usually one of the 1x1 offscreen helpers apps keep
-                // around, but not always: Stage Manager parks the windows of apps that aren't
-                // in the current stage, and those lose their Space assignment too while still
-                // being perfectly real windows the user expects to switch to. Minimized windows
-                // land here as well. Ask accessibility, which still lists both kinds, and drop
-                // only what it doesn't vouch for.
-                if !minimized {
+
+            if let space = space {
+                minimized = false
+                // Accessibility can only speak for the Space that is currently showing, and only
+                // when the app actually answers. Where it does, let it veto the sliver windows
+                // apps like Chrome expose that look real here but cannot be focused.
+                if space == activeSpace {
                     if axCache[pid] == nil { axCache[pid] = axStandardWindowIDs(ofPID: pid) }
-                    if !axCache[pid]!.contains(id) { continue }
+                    let vouched = axCache[pid]!
+                    if !vouched.isEmpty, !vouched.contains(id) { continue }
                 }
             } else {
-                minimized = false
-                if space == activeSpace {
-                    // AX can speak for this Space, so let it reject the sliver windows apps
-                    // like Chrome expose that look real in CGWindowList but cannot be focused.
-                    if axCache[pid] == nil { axCache[pid] = axStandardWindowIDs(ofPID: pid) }
-                    if !axCache[pid]!.contains(id) { continue }
-                } else if rect.width < 200 || rect.height < 200 {
-                    continue
-                }
+                // A window the window server has placed on no Space at all is not somewhere the
+                // user can be sent. Apps keep plenty of these around: Mail and Messages hold
+                // full-size ones open with no visible window at all, and VS Code and Chrome keep
+                // several each. Treating them as desktop windows is what put apps in the switcher
+                // that had no windows, and worse, made picking one surface it on top of whichever
+                // fullscreen Space you happened to be on, because there was no Space to travel to.
+                //
+                // The sole exception is a genuinely minimized window, which really does belong to
+                // the desktop it will restore onto.
+                if minimizedCache[pid] == nil { minimizedCache[pid] = minimizedWindowIDs(ofPID: pid) }
+                guard minimizedCache[pid]!.contains(id) else { continue }
+                minimized = true
             }
 
             let name = entry[kCGWindowOwnerName as String] as? String ?? ""

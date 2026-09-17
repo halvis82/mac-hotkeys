@@ -90,6 +90,11 @@ final class SkyLight {
         return (result.takeRetainedValue() as? [NSNumber])?.first?.uint64Value
     }
 
+    /// Looks up a Space by id, so callers holding only an id can still switch to it.
+    func spaceInfo(id: UInt64) -> SpaceInfo? {
+        orderedSpaces().first { $0.id == id }
+    }
+
     func switchTo(space: SpaceInfo) {
         setCurrentSpace(connectionID, space.displayUUID as CFString, space.id)
     }

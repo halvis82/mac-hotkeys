@@ -2,15 +2,25 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-APP_NAME="FullscreenCycle"
+APP_NAME="MacHotkeys"
 APP_DIR="$HOME/Applications/$APP_NAME.app"
-LABEL="com.halvor.fullscreencycle"
+LABEL="com.halvor.machotkeys"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 LOG_DIR="$HOME/Library/Logs"
 
+# Retire the three separate agents this replaced, so their permission entries and duplicate
+# event taps don't linger. Two switchers fighting over Cmd+Tab is a genuinely confusing bug.
+for OLD in focustoggle fullscreencycle cmdtabswitcher; do
+    launchctl bootout "gui/$UID/com.halvor.$OLD" 2>/dev/null || true
+    rm -f "$HOME/Library/LaunchAgents/com.halvor.$OLD.plist"
+done
+rm -rf "$HOME/Applications/FocusToggle.app" \
+       "$HOME/Applications/FullscreenCycle.app" \
+       "$HOME/Applications/CmdTabSwitcher.app"
+
 echo "==> Building"
 mkdir -p "$APP_DIR/Contents/MacOS"
-swiftc -O -o "$APP_DIR/Contents/MacOS/$APP_NAME" "$HERE/src/main.swift" \
+swiftc -O -o "$APP_DIR/Contents/MacOS/$APP_NAME" "$HERE"/src/*.swift \
     -framework Cocoa -framework ApplicationServices
 
 cat > "$APP_DIR/Contents/Info.plist" <<PLISTEOF
@@ -19,7 +29,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLISTEOF
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key><string>$APP_NAME</string>
-    <key>CFBundleDisplayName</key><string>Fullscreen Cycle</string>
+    <key>CFBundleDisplayName</key><string>Mac Hotkeys</string>
     <key>CFBundleIdentifier</key><string>$LABEL</string>
     <key>CFBundleExecutable</key><string>$APP_NAME</string>
     <key>CFBundlePackageType</key><string>APPL</string>
@@ -31,7 +41,18 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLISTEOF
 </plist>
 PLISTEOF
 
-codesign --force --deep --sign - "$APP_DIR" >/dev/null 2>&1 || true
+# Prefer a stable signing identity. Ad-hoc signatures change on every build, so macOS treats
+# each rebuild as a different app: the Privacy & Security entry silently goes stale, showing as
+# enabled while granting nothing. A fixed identity keeps grants valid across rebuilds.
+# See README.md for the one-time setup.
+SIGN_ID="Halvor Local Codesign"
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "$SIGN_ID"; then
+    echo "==> Signing with stable identity ($SIGN_ID)"
+    codesign --force --deep --sign "$SIGN_ID" "$APP_DIR" >/dev/null 2>&1 || true
+else
+    echo "==> Signing ad-hoc (permissions will need re-granting after each rebuild)"
+    codesign --force --deep --sign - "$APP_DIR" >/dev/null 2>&1 || true
+fi
 
 echo "==> Installing LaunchAgent"
 mkdir -p "$HOME/Library/LaunchAgents" "$LOG_DIR"
@@ -66,4 +87,5 @@ echo "==> Done."
 echo "    App:  $APP_DIR"
 echo "    Log:  $LOG_DIR/$LABEL.log"
 echo ""
-echo "    First run needs Accessibility + Input Monitoring permission - see README.md."
+echo "    One app now, so permissions are granted once: Accessibility (required),"
+echo "    Screen Recording (switcher previews), Full Disk Access (focus state)."
