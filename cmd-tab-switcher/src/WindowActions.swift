@@ -48,31 +48,49 @@ enum WindowActions {
         AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
     }
 
-    /// Switches to the window's Space if needed, then focuses it.
+    /// Switches to the window's Space, waits for that to actually happen, and only then focuses
+    /// the window.
     ///
-    /// A window on another Space isn't in its app's AX list until that Space finishes becoming
-    /// current, so the raise is retried until it lands rather than guessing a fixed delay.
+    /// The waiting is the important part. Activating an app while the Space transition is still
+    /// running makes macOS surface that app on the Space being left behind, which is how picking
+    /// a desktop app used to dump its window on top of whatever fullscreen Space you were on
+    /// instead of taking you to the desktop.
     static func activate(window: WindowInfo, space: SpaceInfo, _ sky: SkyLight) {
-        let app = NSRunningApplication(processIdentifier: window.pid)
-
-        if window.isMinimized {
-            // A minimized window belongs to no Space, so go to the desktop it will restore
-            // onto first, then bring it back before trying to focus it.
-            if sky.activeSpace != space.id { sky.switchTo(space: space) }
-            app?.activate()
-            unminimize(windowID: window.id, ofPID: window.pid)
-        } else if sky.activeSpace != space.id {
+        let deadline = Date().addingTimeInterval(2.5)
+        if sky.activeSpace != space.id {
             sky.switchTo(space: space)
         }
+        focusOnceSpaceIsCurrent(window: window, space: space, sky: sky, deadline: deadline)
+    }
 
-        let deadline = Date().addingTimeInterval(2.0)
-        func attempt() {
-            app?.activate()
+    private static func focusOnceSpaceIsCurrent(window: WindowInfo,
+                                                space: SpaceInfo,
+                                                sky: SkyLight,
+                                                deadline: Date) {
+        guard sky.activeSpace == space.id || Date() >= deadline else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
+                focusOnceSpaceIsCurrent(window: window, space: space, sky: sky, deadline: deadline)
+            }
+            return
+        }
+
+        let app = NSRunningApplication(processIdentifier: window.pid)
+        app?.activate()
+        if window.isMinimized {
+            unminimize(windowID: window.id, ofPID: window.pid)
+        }
+
+        // The window only joins its app's AX list once its Space is settled, so keep trying
+        // rather than guessing how long the animation takes.
+        func attemptRaise() {
             if raise(windowID: window.id, ofPID: window.pid) { return }
             guard Date() < deadline else { return }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) { attempt() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) {
+                app?.activate()
+                attemptRaise()
+            }
         }
-        attempt()
+        attemptRaise()
     }
 }
 
@@ -98,6 +116,11 @@ final class MRUTracker {
                 }
             }
         }
+    }
+
+    /// How recently a window was used, lower being more recent. Windows never seen sort last.
+    func rank(of id: CGWindowID) -> Int {
+        order.firstIndex(of: id) ?? Int.max
     }
 
     func record(_ id: CGWindowID) {

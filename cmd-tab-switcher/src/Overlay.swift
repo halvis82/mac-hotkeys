@@ -1,13 +1,24 @@
 import Cocoa
 
+/// Where each tile and each desktop icon sits, shared by drawing and hit testing so the two
+/// can't disagree about what the user is pointing at.
+struct TileLayout {
+    let tileRects: [NSRect]
+    let iconRects: [Int: [NSRect]] // tile index -> icon rects, desktop tiles only
+}
+
 /// Draws the switcher row: one tile per fullscreen window, one per desktop Space.
 final class SwitcherView: NSView {
     var tiles: [Tile] = []
     var selected = 0
-    /// Which window inside a desktop tile the arrow keys have picked, keyed by Space id.
+    /// Which window inside a desktop tile is picked, keyed by Space id.
     var desktopSelection: [UInt64: Int] = [:]
     var thumbnails: [CGWindowID: NSImage] = [:]
     var desktopPreviews: [UInt64: NSImage] = [:]
+
+    /// Called when the mouse picks a tile (and optionally an icon within a desktop tile).
+    var onHover: ((Int, Int?) -> Void)?
+    var onClick: ((Int, Int?) -> Void)?
 
     static let tileHeight: CGFloat = 132
     static let gap: CGFloat = 14
@@ -39,12 +50,32 @@ final class SwitcherView: NSView {
                height: Self.tileHeight)
     }
 
-    /// The window that would be activated right now, which is what the label describes and
-    /// what committing the switcher acts on.
+    /// Icon positions inside a desktop tile, laid out as a centered grid.
+    private func iconRects(count: Int, in rect: NSRect) -> [NSRect] {
+        guard count > 0 else { return [] }
+        let iconSize: CGFloat = min(38, rect.width / 5.2)
+        let spacing: CGFloat = 7
+        let perRow = max(1, min(count, Int((rect.width - 16) / (iconSize + spacing))))
+        let rows = Int(ceil(Double(count) / Double(perRow)))
+        let gridHeight = CGFloat(rows) * iconSize + CGFloat(rows - 1) * spacing
+
+        var rects: [NSRect] = []
+        for index in 0..<count {
+            let row = index / perRow
+            let column = index % perRow
+            let itemsInRow = min(perRow, count - row * perRow)
+            let rowWidth = CGFloat(itemsInRow) * iconSize + CGFloat(itemsInRow - 1) * spacing
+            let x = rect.midX - rowWidth / 2 + CGFloat(column) * (iconSize + spacing)
+            let y = rect.midY + gridHeight / 2 - CGFloat(row + 1) * iconSize - CGFloat(row) * spacing
+            rects.append(NSRect(x: x, y: y, width: iconSize, height: iconSize))
+        }
+        return rects
+    }
+
+    /// The window that would be activated right now.
     func currentWindow() -> WindowInfo? {
         guard selected < tiles.count else { return nil }
-        let tile = tiles[selected]
-        switch tile {
+        switch tiles[selected] {
         case .window(_, let window):
             return window
         case .desktop(let space, let windows):
@@ -55,6 +86,52 @@ final class SwitcherView: NSView {
 
     override var isFlipped: Bool { false }
 
+    // MARK: - Mouse
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        // .activeAlways because the panel never becomes key, so the usual
+        // mouse-moved delivery to the key window would never reach us.
+        addTrackingArea(NSTrackingArea(rect: bounds,
+                                       options: [.mouseMoved, .activeAlways, .inVisibleRect],
+                                       owner: self,
+                                       userInfo: nil))
+    }
+
+    /// Which tile, and which icon inside it, a point falls on.
+    private func hit(_ point: NSPoint) -> (tile: Int, icon: Int?)? {
+        for index in tiles.indices {
+            let rect = tileRect(index)
+            guard rect.insetBy(dx: -Self.gap / 2, dy: -8).contains(point) else { continue }
+            if case .desktop(_, let windows) = tiles[index] {
+                let rects = iconRects(count: windows.count, in: rect)
+                for (iconIndex, iconRect) in rects.enumerated()
+                where iconRect.insetBy(dx: -4, dy: -4).contains(point) {
+                    return (index, iconIndex)
+                }
+            }
+            return (index, nil)
+        }
+        return nil
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        guard let hit = hit(convert(event.locationInWindow, from: nil)) else { return }
+        onHover?(hit.tile, hit.icon)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        mouseMoved(with: event)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard let hit = hit(convert(event.locationInWindow, from: nil)) else { return }
+        onClick?(hit.tile, hit.icon)
+    }
+
+    // MARK: - Drawing
+
     override func draw(_ dirtyRect: NSRect) {
         NSGraphicsContext.current?.imageInterpolation = .high
 
@@ -64,7 +141,7 @@ final class SwitcherView: NSView {
             drawThumbnail(for: tile, in: rect)
             switch tile {
             case .window(_, let window):
-                drawAppIcon(window.icon, at: rect, highlighted: false)
+                drawAppIcon(window.icon, at: rect)
             case .desktop(let space, let windows):
                 drawIconGrid(windows,
                              in: rect,
@@ -96,7 +173,7 @@ final class SwitcherView: NSView {
         case .desktop(let space, _): image = desktopPreviews[space.id]
         }
 
-        if let image = image {
+        if let image = image, image.size.width > 0, image.size.height > 0 {
             // Aspect fill so tiles read as uniform cards instead of letterboxed strips.
             let scale = max(rect.width / image.size.width, rect.height / image.size.height)
             let size = NSSize(width: image.size.width * scale, height: image.size.height * scale)
@@ -117,7 +194,7 @@ final class SwitcherView: NSView {
         path.stroke()
     }
 
-    private func drawAppIcon(_ icon: NSImage?, at rect: NSRect, highlighted: Bool) {
+    private func drawAppIcon(_ icon: NSImage?, at rect: NSRect) {
         guard let icon = icon else { return }
         let size: CGFloat = min(42, rect.width * 0.28)
         let iconRect = NSRect(x: rect.minX + 7, y: rect.minY + 7, width: size, height: size)
@@ -131,25 +208,12 @@ final class SwitcherView: NSView {
         NSGraphicsContext.current?.restoreGraphicsState()
     }
 
-    /// Desktop tiles show every window on that Space as an icon, in the order the arrow keys
-    /// step through them, laid over the desktop preview.
+    /// Desktop tiles show one icon per app on that Space, in the order the arrow keys step
+    /// through them, laid over the desktop preview.
     private func drawIconGrid(_ windows: [WindowInfo], in rect: NSRect, selectedIndex: Int) {
-        guard !windows.isEmpty else { return }
-        let iconSize: CGFloat = min(38, rect.width / 5.2)
-        let spacing: CGFloat = 7
-        let perRow = max(1, min(windows.count, Int((rect.width - 16) / (iconSize + spacing))))
-        let rows = Int(ceil(Double(windows.count) / Double(perRow)))
-        let gridHeight = CGFloat(rows) * iconSize + CGFloat(rows - 1) * spacing
-
+        let rects = iconRects(count: windows.count, in: rect)
         for (index, window) in windows.enumerated() {
-            let row = index / perRow
-            let column = index % perRow
-            let itemsInRow = min(perRow, windows.count - row * perRow)
-            let rowWidth = CGFloat(itemsInRow) * iconSize + CGFloat(itemsInRow - 1) * spacing
-            let x = rect.midX - rowWidth / 2 + CGFloat(column) * (iconSize + spacing)
-            let y = rect.midY + gridHeight / 2 - CGFloat(row + 1) * iconSize - CGFloat(row) * spacing
-            let iconRect = NSRect(x: x, y: y, width: iconSize, height: iconSize)
-
+            let iconRect = rects[index]
             if index == selectedIndex {
                 let ring = NSBezierPath(roundedRect: iconRect.insetBy(dx: -4, dy: -4), xRadius: 8, yRadius: 8)
                 NSColor.white.withAlphaComponent(0.85).setFill()
@@ -185,10 +249,34 @@ final class SwitcherView: NSView {
     }
 }
 
-/// The floating panel itself. It must never take focus, or the app we are switching away from
-/// would stop being frontmost and committing would act on the wrong window.
+/// Full-screen backdrop. It exists to swallow mouse events: without it, clicks and drags land
+/// in whatever app is underneath, so dragging across the switcher would select text in the
+/// window behind it.
+final class ShieldView: NSView {
+    var onClickOutside: (() -> Void)?
+    var hudRect: NSRect = .zero
+
+    override func mouseUp(with event: NSEvent) {
+        if !hudRect.contains(convert(event.locationInWindow, from: nil)) { onClickOutside?() }
+    }
+
+    // Swallow the rest so nothing reaches the app below.
+    override func mouseDown(with event: NSEvent) {}
+    override func mouseDragged(with event: NSEvent) {}
+    override func rightMouseDown(with event: NSEvent) {}
+    override func rightMouseUp(with event: NSEvent) {}
+    override func otherMouseDown(with event: NSEvent) {}
+    override func scrollWheel(with event: NSEvent) {}
+}
+
+/// The floating panel. It must never take focus, or the app being switched away from would stop
+/// being frontmost and committing would act on the wrong window.
 final class OverlayPanel: NSPanel {
     let switcherView = SwitcherView()
+    private let shield = ShieldView()
+    private let effect = NSVisualEffectView()
+
+    var onCancel: (() -> Void)?
 
     init() {
         super.init(contentRect: NSRect(x: 0, y: 0, width: 400, height: 200),
@@ -200,21 +288,22 @@ final class OverlayPanel: NSPanel {
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         isOpaque = false
         backgroundColor = .clear
-        hasShadow = true
+        hasShadow = false
         hidesOnDeactivate = false
-        ignoresMouseEvents = true
+        acceptsMouseMovedEvents = true
+        ignoresMouseEvents = false
 
-        let effect = NSVisualEffectView()
         effect.material = .hudWindow
         effect.blendingMode = .behindWindow
         effect.state = .active
         effect.wantsLayer = true
         effect.layer?.cornerRadius = 22
         effect.layer?.masksToBounds = true
-        contentView = effect
 
-        switcherView.autoresizingMask = [.width, .height]
-        effect.addSubview(switcherView)
+        shield.addSubview(effect)
+        shield.addSubview(switcherView)
+        shield.onClickOutside = { [weak self] in self?.onCancel?() }
+        contentView = shield
     }
 
     override var canBecomeKey: Bool { false }
@@ -226,11 +315,19 @@ final class OverlayPanel: NSPanel {
         switcherView.desktopSelection = desktopSelection
 
         let screen = NSScreen.main ?? NSScreen.screens[0]
-        let size = switcherView.layoutSize(maxWidth: screen.frame.width - 90)
-        let origin = NSPoint(x: screen.frame.midX - size.width / 2,
-                             y: screen.frame.midY - size.height / 2)
-        setFrame(NSRect(origin: origin, size: size), display: true)
-        switcherView.frame = NSRect(origin: .zero, size: size)
+        let hudSize = switcherView.layoutSize(maxWidth: screen.frame.width - 90)
+
+        // The panel covers the whole screen so no mouse event can slip past it; the visible
+        // HUD is just a subview in the middle.
+        setFrame(screen.frame, display: true)
+        let hudRect = NSRect(x: (screen.frame.width - hudSize.width) / 2,
+                             y: (screen.frame.height - hudSize.height) / 2,
+                             width: hudSize.width,
+                             height: hudSize.height)
+        shield.frame = NSRect(origin: .zero, size: screen.frame.size)
+        shield.hudRect = hudRect
+        effect.frame = hudRect
+        switcherView.frame = hudRect
         switcherView.needsDisplay = true
         orderFrontRegardless()
     }

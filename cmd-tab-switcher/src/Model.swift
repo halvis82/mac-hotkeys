@@ -5,6 +5,9 @@ struct WindowInfo {
     let id: CGWindowID
     let pid: pid_t
     let appName: String
+    /// Identifies the app for grouping. Chrome runs several processes and can own windows under
+    /// more than one pid, so pid alone would show the same app as several separate icons.
+    let appKey: String
     let title: String
     let bounds: CGRect
     let isMinimized: Bool
@@ -47,6 +50,10 @@ enum WindowLister {
     /// on all run as accessory or prohibited apps rather than regular ones.
     private static func isRegularApp(_ pid: pid_t) -> Bool {
         NSRunningApplication(processIdentifier: pid)?.activationPolicy == .regular
+    }
+
+    private static func appKey(_ pid: pid_t, fallback: String) -> String {
+        NSRunningApplication(processIdentifier: pid)?.bundleIdentifier ?? fallback
     }
 
     /// Window ids AX currently vouches for as real, non-minimized document windows.
@@ -121,9 +128,16 @@ enum WindowLister {
             if space == nil {
                 if minimizedCache[pid] == nil { minimizedCache[pid] = minimizedWindowIDs(ofPID: pid) }
                 minimized = minimizedCache[pid]!.contains(id)
-                // No Space and not minimized means a window the window server never placed,
-                // which is the swarm of 1x1 and offscreen helpers apps keep around.
-                if !minimized { continue }
+                // A window with no Space is usually one of the 1x1 offscreen helpers apps keep
+                // around, but not always: Stage Manager parks the windows of apps that aren't
+                // in the current stage, and those lose their Space assignment too while still
+                // being perfectly real windows the user expects to switch to. Minimized windows
+                // land here as well. Ask accessibility, which still lists both kinds, and drop
+                // only what it doesn't vouch for.
+                if !minimized {
+                    if axCache[pid] == nil { axCache[pid] = axStandardWindowIDs(ofPID: pid) }
+                    if !axCache[pid]!.contains(id) { continue }
+                }
             } else {
                 minimized = false
                 if space == activeSpace {
@@ -136,9 +150,11 @@ enum WindowLister {
                 }
             }
 
+            let name = entry[kCGWindowOwnerName as String] as? String ?? ""
             let info = WindowInfo(id: id,
                                   pid: pid,
-                                  appName: entry[kCGWindowOwnerName as String] as? String ?? "",
+                                  appName: name,
+                                  appKey: appKey(pid, fallback: name.isEmpty ? "pid:\(pid)" : name),
                                   title: entry[kCGWindowName as String] as? String ?? "",
                                   bounds: rect,
                                   isMinimized: minimized)
@@ -147,10 +163,29 @@ enum WindowLister {
         return result
     }
 
+    /// One entry per app, each standing for that app's most recently used window.
+    ///
+    /// A desktop can easily hold several windows of the same app, and showing one icon per
+    /// window makes the grid a wall of duplicates. Picking an app is understood as "that app's
+    /// most recent window", which `recency` decides (lower is more recent).
+    /// Apps are ordered by lowest window id so the grid stays put between openings rather than
+    /// reshuffling as recency changes.
+    private static func oneWindowPerApp(_ windows: [WindowInfo],
+                                        recency: (CGWindowID) -> Int) -> [WindowInfo] {
+        var best: [String: WindowInfo] = [:]
+        for window in windows {
+            guard let existing = best[window.appKey] else { best[window.appKey] = window; continue }
+            if recency(window.id) < recency(existing.id) { best[window.appKey] = window }
+        }
+        let firstWindowID = Dictionary(grouping: windows, by: { $0.appKey })
+            .mapValues { $0.map(\.id).min() ?? 0 }
+        return best.values.sorted { (firstWindowID[$0.appKey] ?? 0) < (firstWindowID[$1.appKey] ?? 0) }
+    }
+
     /// The switcher row: Spaces in window-server order, fullscreen ones expanded to a tile per
     /// window, desktop ones collapsed to a single tile. Empty Spaces are skipped so the row
     /// only ever shows places there is actually something to switch to.
-    static func buildTiles(_ sky: SkyLight) -> [Tile] {
+    static func buildTiles(_ sky: SkyLight, recency: (CGWindowID) -> Int = { _ in Int.max }) -> [Tile] {
         let bySpace = allWindows(sky)
         var tiles: [Tile] = []
         var firstDesktopIndex: Int?
@@ -174,12 +209,18 @@ enum WindowLister {
             }
         }
 
-        // Minimized windows have no Space of their own, so they hang off the first desktop
-        // tile, which is where restoring them will put them anyway.
+        // Minimized and Stage-Manager-parked windows have no Space of their own, so they hang
+        // off the first desktop tile, which is where activating them puts them anyway.
         let orphans = (bySpace[nil] ?? []).sorted { $0.id < $1.id }
         if !orphans.isEmpty, let index = firstDesktopIndex,
            case .desktop(let space, let windows) = tiles[index] {
             tiles[index] = .desktop(space: space, windows: windows + orphans)
+        }
+
+        // Collapse each desktop to one icon per app once every window has been gathered.
+        tiles = tiles.map { tile in
+            guard case .desktop(let space, let windows) = tile else { return tile }
+            return .desktop(space: space, windows: oneWindowPerApp(windows, recency: recency))
         }
 
         return tiles.filter { !$0.windows.isEmpty }

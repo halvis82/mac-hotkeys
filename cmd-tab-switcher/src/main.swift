@@ -25,13 +25,33 @@ final class SwitcherController {
 
     init(sky: SkyLight) {
         self.sky = sky
+
+        panel.onCancel = { [weak self] in self?.cancel() }
+        panel.switcherView.onHover = { [weak self] tile, icon in
+            self?.point(atTile: tile, icon: icon, commit: false)
+        }
+        panel.switcherView.onClick = { [weak self] tile, icon in
+            self?.point(atTile: tile, icon: icon, commit: true)
+        }
+    }
+
+    /// Mouse selection. Hovering moves the highlight, clicking takes it.
+    private func point(atTile tile: Int, icon: Int?, commit shouldCommit: Bool) {
+        guard isOpen, tiles.indices.contains(tile) else { return }
+        selected = tile
+        if let icon = icon, case .desktop(let space, let windows) = tiles[tile],
+           windows.indices.contains(icon) {
+            desktopSelection[space.id] = icon
+        }
+        panel.refresh(selected: selected, desktopSelection: desktopSelection)
+        if shouldCommit { commit() }
     }
 
     func open(backwards: Bool) {
         let current = WindowActions.focusedWindowID()
         if let current = current { mru.record(current) }
 
-        tiles = WindowLister.buildTiles(sky)
+        tiles = WindowLister.buildTiles(sky, recency: { [mru] in mru.rank(of: $0) })
         guard !tiles.isEmpty else { return }
 
         openedAtWindow = current

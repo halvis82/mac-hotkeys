@@ -6,19 +6,27 @@ each one actually looks like, and is ordered by where things really are rather t
 - One tile per fullscreen window, one tile per desktop Space, left to right in window-server
   order, which is the same order Ctrl+Arrow moves through.
 - Each tile previews the real window contents with the app icon floating over the bottom left.
-- A desktop Space is a single tile no matter how many windows are on it. Its windows appear as a
-  grid of icons over the desktop preview.
+- A desktop Space is a single tile no matter how many windows are on it. Its apps appear as a grid
+  of icons over the desktop preview, one icon per app; picking one goes to that app's most
+  recently used window there.
 - Only apps that actually have windows show up.
 
 ## Keys
 
-| Key | Action |
+| Input | Action |
 |---|---|
 | `Cmd+Tab` | Open, then step forward through tiles (wraps) |
 | `Cmd+Shift+Tab` | Step backward |
-| `Left` / `Right` | On a desktop tile, pick which of its windows to focus. Does nothing on other tiles and stops at the ends |
+| `Left` / `Right` | On a desktop tile, pick which of its apps to focus. Does nothing on other tiles and stops at the ends |
 | `Esc` | Close and stay exactly where you are |
 | release `Cmd` | Go to the selected window |
+| move the mouse | Highlight whatever is under the pointer, including individual desktop icons |
+| click | Take that window immediately |
+| click outside the menu | Close and stay put |
+
+While the switcher is open it covers the screen with an invisible shield, so clicks and drags
+cannot reach the app underneath. Without that, dragging across the menu would select text in the
+window behind it.
 
 The highlight opens on the **most recently used other window**, not the next tile along, so a
 quick Cmd+Tab still flips between your last two windows the way the system one does. Tiles stay
@@ -69,6 +77,14 @@ re-running `install.sh` you may need to toggle them off and on again.
   cannot be focused. Elsewhere AX has nothing to say, so a fullscreen Space instead keeps only
   windows comparable in area to its largest, which drops helper windows while keeping both halves
   of a split view.
+- **Stage Manager** is supported. It parks the windows of apps that aren't in the current stage,
+  and those windows lose their Space assignment while staying perfectly real. They used to be
+  discarded along with the 1x1 offscreen junk, which is why only one or two desktop apps would
+  show up. Windows with no Space are now kept when accessibility still lists them as standard
+  windows, which also covers minimized ones.
+- **Switching to a window** waits for its Space to actually become current before touching the
+  app. Activating mid-transition makes macOS surface the app on the Space being left behind,
+  which is what used to dump a desktop app on top of whatever fullscreen Space you were on.
 - **Previews.** `SLSHWCaptureWindowList` captures a window even when its Space isn't active, which
   no public API can do. Captures run about 5ms each, off the main thread, and fill in as they
   arrive so the overlay never waits on them.
