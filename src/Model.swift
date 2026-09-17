@@ -102,7 +102,7 @@ enum WindowLister {
 
     /// Every switchable window, keyed by the Space it lives on. Windows with no Space at all
     /// (minimized ones) come back under `nil`.
-    static func allWindows(_ sky: SkyLight) -> [UInt64?: [WindowInfo]] {
+    static func allWindows(_ sky: SkyLight, onlyPID: pid_t? = nil) -> [UInt64?: [WindowInfo]] {
         let options: CGWindowListOption = [.optionAll, .excludeDesktopElements]
         guard let list = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else { return [:] }
 
@@ -114,6 +114,7 @@ enum WindowLister {
         for entry in list {
             guard (entry[kCGWindowLayer as String] as? Int) == 0,
                   let pid = entry[kCGWindowOwnerPID as String] as? pid_t,
+                  onlyPID == nil || pid == onlyPID,
                   let id = entry[kCGWindowNumber as String] as? CGWindowID,
                   isRegularApp(pid)
             else { continue }
@@ -190,6 +191,31 @@ enum WindowLister {
         let firstWindowID = Dictionary(grouping: windows, by: { $0.appKey })
             .mapValues { $0.map(\.id).min() ?? 0 }
         return best.values.sorted { (firstWindowID[$0.appKey] ?? 0) < (firstWindowID[$1.appKey] ?? 0) }
+    }
+
+    /// Every switchable window of one app, filtered exactly as the switcher filters them.
+    ///
+    /// Cmd+backtick used to keep its own copy of this and drifted: it let through the sliver
+    /// helper windows apps park on fullscreen Spaces, so cycling could land on a 1512x68 strip
+    /// with no title, which cannot be focused and simply wasted a press.
+    static func switchableWindows(ofPID pid: pid_t, _ sky: SkyLight) -> [WindowInfo] {
+        // Restricted to this app up front. Cmd+backtick only ever cycles one app, and asking the
+        // window server which Space every window on the system belongs to costs a round trip per
+        // window, which is what made each press feel sluggish.
+        let bySpace = allWindows(sky, onlyPID: pid)
+        var result: [WindowInfo] = []
+        for space in sky.orderedSpaces() {
+            var windows = bySpace[space.id] ?? []
+            if space.isFullscreen {
+                let largest = windows.map { $0.bounds.width * $0.bounds.height }.max() ?? 0
+                if largest > 0 {
+                    windows = windows.filter { $0.bounds.width * $0.bounds.height >= largest * 0.4 }
+                }
+            }
+            result.append(contentsOf: windows)
+        }
+        result.append(contentsOf: bySpace[nil] ?? [])
+        return result.sorted { $0.id < $1.id }
     }
 
     /// The switcher row: Spaces in window-server order, fullscreen ones expanded to a tile per

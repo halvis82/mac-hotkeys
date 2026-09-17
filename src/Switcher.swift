@@ -141,13 +141,12 @@ final class SwitcherController {
         if verbose { log("commit -> \(window.appName) wid=\(window.id) space=\(tile.space.id)") }
         mru.record(window.id)
 
-        // Let the overlay actually leave the screen before anything moves Spaces. The panel
-        // joins every Space and sits above fullscreen windows, and starting a Space change in
-        // the same breath as tearing it down leaves the window server drawing the Space we came
-        // from: the new window appears over the old fullscreen app even though the Space really
-        // did change underneath. One turn of the run loop plus a beat is enough to separate them.
+        // One run-loop turn, so the overlay is off screen before anything moves Spaces. The
+        // panel joins every Space and sits above fullscreen windows; starting a Space change
+        // while it is still up left the window server drawing the Space we came from. A hop is
+        // enough to separate them, and unlike a timed delay it costs nothing perceptible.
         let sky = self.sky
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+        DispatchQueue.main.async {
             WindowActions.activate(window: window, space: tile.space, sky)
         }
     }

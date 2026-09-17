@@ -87,51 +87,47 @@ enum WindowActions {
     }
 
     static func activate(window: WindowInfo, space: SpaceInfo, _ sky: SkyLight) {
-        let deadline = Date().addingTimeInterval(3.0)
         trace("commit start, target space \(space.id)", sky, window)
 
+        // Already there: nothing to navigate, just focus it.
         guard sky.activeSpace != space.id else {
-            focusNow(window: window, space: space, sky: sky, deadline: deadline)
+            focusNow(window: window, space: space, sky: sky, deadline: Date().addingTimeInterval(1.0))
             return
         }
 
-        guard space.isFullscreen else {
-            // Desktop target: hand the whole job to LaunchServices and then keep our hands off.
-            //
-            // Nothing here may raise or activate afterwards. Every "wait until we have arrived"
-            // signal available is a lie: the active Space flips about 10ms after the request
-            // while the transition runs for 400ms more, and the on-screen window list includes
-            // windows from Spaces that aren't showing. Acting on either still lands mid-flight
-            // every so often, which drags the window on top of the Space being left. That is the
-            // intermittent bug, and no amount of waiting fixes it.
-            //
-            // It costs nothing, because a desktop tile picks an *app*, not one of its windows,
-            // and activating an app already brings its most recent window forward.
-            if ownsWindowsOutside(space: space, pid: window.pid, sky),
-               let finder = NSRunningApplication
-                   .runningApplications(withBundleIdentifier: "com.apple.finder").first,
-               finder.processIdentifier != window.pid {
-                // The app also owns windows on other Spaces, so LaunchServices cannot express
-                // "the one on the desktop": it activates whichever window it thinks is most
-                // recent, which may be the app's fullscreen window, and that is how a Chrome
-                // window ends up drawn over a fullscreen Space.
-                //
-                // Travel to the desktop via Finder, which owns the desktop and has no windows
-                // anywhere else, then raise the intended window once we are genuinely there.
-                openLikeDock(pid: finder.processIdentifier)
-                raiseOnceSettled(window: window, space: space, sky: sky)
-            } else {
-                openLikeDock(pid: window.pid)
-                if window.isMinimized { unminimizeOnceSettled(window: window, space: space, sky: sky) }
-            }
+        // Same app, different Space, which is every Cmd+backtick press. Its Window menu is
+        // immediate and names the exact window, so there is nothing to wait for.
+        let app = NSRunningApplication(processIdentifier: window.pid)
+        if app?.isActive == true, selectViaWindowMenu(window: window) {
+            trace("navigated via Window menu", sky, window)
             return
         }
 
-        // Fullscreen target. Activating the app lands on one of its fullscreen Spaces properly;
-        // if that isn't the one asked for, its own Window menu is used to reach the exact
-        // window, which macOS navigates itself.
+        // Another app: activating it is the only thing that can leave a fullscreen Space.
         openLikeDock(pid: window.pid)
-        selectExactWindowOnceSettled(window: window, space: space, sky: sky)
+        correctWindowOnceFrontmost(window: window, space: space, sky: sky,
+                                   deadline: Date().addingTimeInterval(1.5))
+    }
+
+    /// Activation brings an app forward on whichever Space holds its most recent window, which
+    /// may not be the window that was picked. Once the app is frontmost its Window menu becomes
+    /// readable, so the exact window can be reached from there.
+    ///
+    /// Polled rather than delayed by a fixed amount: waiting a flat half second made every
+    /// switch feel slower than the system animation it replaced.
+    private static func correctWindowOnceFrontmost(window: WindowInfo,
+                                                   space: SpaceInfo,
+                                                   sky: SkyLight,
+                                                   deadline: Date) {
+        if sky.activeSpace == space.id { return } // activation already landed correctly
+        guard Date() < deadline else { return }
+        if NSRunningApplication(processIdentifier: window.pid)?.isActive == true,
+           selectViaWindowMenu(window: window) {
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
+            correctWindowOnceFrontmost(window: window, space: space, sky: sky, deadline: deadline)
+        }
     }
 
     /// Picks a window through its app's own Window menu.
@@ -182,36 +178,7 @@ enum WindowActions {
         return false
     }
 
-    /// After activating the app, nudges it onto the exact window that was asked for, if
-    /// activation landed somewhere else. Only relevant for apps owning several fullscreen
-    /// windows; for everything else the activation already did the job.
-    private static func selectExactWindowOnceSettled(window: WindowInfo,
-                                                     space: SpaceInfo,
-                                                     sky: SkyLight) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) {
-            guard sky.activeSpace != space.id else { return }
-            if !selectViaWindowMenu(window: window) {
-                log("could not reach \(window.appName) window \"\(window.title)\" via its Window menu")
-            }
-        }
-    }
 
-    /// Whether this app owns any window on a Space other than `space`, which is what makes a
-    /// plain activation ambiguous.
-    private static func ownsWindowsOutside(space: SpaceInfo, pid: pid_t, _ sky: SkyLight) -> Bool {
-        let options: CGWindowListOption = [.optionAll, .excludeDesktopElements]
-        guard let list = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]]
-        else { return false }
-        for entry in list {
-            guard (entry[kCGWindowLayer as String] as? Int) == 0,
-                  (entry[kCGWindowOwnerPID as String] as? pid_t) == pid,
-                  let id = entry[kCGWindowNumber as String] as? CGWindowID,
-                  let other = sky.space(ofWindow: id)
-            else { continue }
-            if other != space.id { return true }
-        }
-        return false
-    }
 
     /// Raises a window after the desktop is genuinely showing.
     ///
@@ -233,41 +200,7 @@ enum WindowActions {
         attempt(40)
     }
 
-    /// A minimized window won't come back on its own, so this is the one thing still done after
-    /// a desktop activation. It waits out the transition first, and only restores the window if
-    /// the desktop really is showing by then.
-    private static func unminimizeOnceSettled(window: WindowInfo, space: SpaceInfo, sky: SkyLight) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
-            guard sky.activeSpace == space.id else { return }
-            unminimize(windowID: window.id, ofPID: window.pid)
-            raise(windowID: window.id, ofPID: window.pid)
-        }
-    }
 
-    /// Waits until the target Space is genuinely current before anything touches the window.
-    ///
-    /// Nothing may happen early. Raising a window, or activating its app, while another Space is
-    /// still showing is what drags it on top of that Space, which is the intermittent version of
-    /// the bug: LaunchServices is asynchronous, so a slow activation used to run past a fixed
-    /// timeout and then get yanked over anyway. If the Space never becomes current we do nothing
-    /// at all, because leaving the user where they are beats dumping a window in front of them.
-    private static func waitForTransition(window: WindowInfo,
-                                          space: SpaceInfo,
-                                          sky: SkyLight,
-                                          deadline: Date) {
-        if sky.activeSpace == space.id {
-            trace("arrived on target space", sky, window)
-            focusNow(window: window, space: space, sky: sky, deadline: deadline)
-            return
-        }
-        guard Date() < deadline else {
-            log("gave up switching to space \(space.id) for \(window.appName); staying put")
-            return
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
-            waitForTransition(window: window, space: space, sky: sky, deadline: deadline)
-        }
-    }
 
     private static func focusNow(window: WindowInfo,
                                  space: SpaceInfo,
