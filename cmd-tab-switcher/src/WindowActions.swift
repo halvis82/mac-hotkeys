@@ -81,14 +81,14 @@ enum WindowActions {
         }
 
         // The window only joins its app's AX list once its Space is settled, so keep trying
-        // rather than guessing how long the animation takes.
+        // rather than guessing how long the animation takes. Activation happens once, above:
+        // re-activating on every attempt would keep yanking focus for as long as the loop runs,
+        // fighting the user if they moved on in the meantime. For the same reason the loop gives
+        // up the moment the user leaves the Space we were aiming at.
         func attemptRaise() {
             if raise(windowID: window.id, ofPID: window.pid) { return }
-            guard Date() < deadline else { return }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) {
-                app?.activate()
-                attemptRaise()
-            }
+            guard Date() < deadline, sky.activeSpace == space.id else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) { attemptRaise() }
         }
         attemptRaise()
     }

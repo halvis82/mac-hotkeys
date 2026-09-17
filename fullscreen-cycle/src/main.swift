@@ -340,41 +340,63 @@ if CommandLine.arguments.contains("--cycle") {
     RunLoop.main.run()
 }
 
-guard AXIsProcessTrusted() else {
-    let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-    _ = AXIsProcessTrustedWithOptions(opts)
-    log("not yet trusted for Accessibility - approve it, then relaunch.")
-    exit(1)
-}
-
 let mask: CGEventMask = (1 << CGEventType.keyDown.rawValue)
 
-guard let tap = CGEvent.tapCreate(
-    tap: .cghidEventTap,
-    place: .headInsertEventTap,
-    options: .defaultTap,
-    eventsOfInterest: mask,
-    callback: { proxy, type, event, refcon in
-        guard event.getIntegerValueField(.keyboardEventKeycode) == graveKeyCode,
-              event.flags.contains(.maskCommand),
-              !event.flags.contains(.maskControl),
-              !event.flags.contains(.maskAlternate)
-        else { return Unmanaged.passUnretained(event) }
+func makeEventTap() -> CFMachPort? {
+    CGEvent.tapCreate(
+        tap: .cghidEventTap,
+        place: .headInsertEventTap,
+        options: .defaultTap,
+        eventsOfInterest: mask,
+        callback: { proxy, type, event, refcon in
+            guard event.getIntegerValueField(.keyboardEventKeycode) == graveKeyCode,
+                  event.flags.contains(.maskCommand),
+                  !event.flags.contains(.maskControl),
+                  !event.flags.contains(.maskAlternate)
+            else { return Unmanaged.passUnretained(event) }
 
-        DispatchQueue.main.async { cycleWindow(Runtime.sky, dryRun: Runtime.dryRun) }
-        return nil // swallow, so the app never sees the broken built-in behavior
-    },
-    userInfo: nil
-) else {
-    log("failed to create event tap - grant Input Monitoring, then relaunch.")
-    exit(1)
+            DispatchQueue.main.async { cycleWindow(Runtime.sky, dryRun: Runtime.dryRun) }
+            return nil // swallow, so the app never sees the broken built-in behavior
+        },
+        userInfo: nil
+    )
 }
 
-let runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
-CGEvent.tapEnable(tap: tap, enable: true)
-log("running (pid \(ProcessInfo.processInfo.processIdentifier))\(Runtime.dryRun ? " [DRY RUN]" : "")")
+/// Waits for permissions rather than exiting without them.
+///
+/// Exiting caused permission-dialog spam: launchd keeps this agent alive, so every exit meant a
+/// relaunch a few seconds later and every relaunch asked again. Staying up and re-checking
+/// quietly means the dialog appears once, and granting it takes effect without a manual restart.
+var askedForAccessibility = false
+var reportedTapFailure = false
 
-let app = NSApplication.shared
-app.setActivationPolicy(.accessory)
-app.run()
+func startWhenPermitted() {
+    guard AXIsProcessTrusted() else {
+        if !askedForAccessibility {
+            askedForAccessibility = true
+            let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+            _ = AXIsProcessTrustedWithOptions(opts)
+            log("waiting for Accessibility permission (System Settings > Privacy & Security)")
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { startWhenPermitted() }
+        return
+    }
+
+    guard let tap = makeEventTap() else {
+        if !reportedTapFailure {
+            reportedTapFailure = true
+            log("waiting for Input Monitoring permission (System Settings > Privacy & Security)")
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { startWhenPermitted() }
+        return
+    }
+
+    CFRunLoopAddSource(CFRunLoopGetCurrent(),
+                       CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0),
+                       .commonModes)
+    CGEvent.tapEnable(tap: tap, enable: true)
+    log("running (pid \(ProcessInfo.processInfo.processIdentifier))\(Runtime.dryRun ? " [DRY RUN]" : "")")
+}
+
+startWhenPermitted()
+NSApplication.shared.run()

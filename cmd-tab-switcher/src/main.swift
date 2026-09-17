@@ -205,12 +205,13 @@ let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 
 // Without Screen Recording the window server still answers capture requests, but hands back
-// blank images rather than failing, so the tiles would silently render empty. Check up front
-// and say so instead.
+// blank images rather than failing, so the tiles would silently render empty. Say so once.
+// Asking is deliberately limited to a single attempt per launch: the agent is kept alive by
+// launchd, so prompting on a loop is what turned one missing grant into a dialog every few
+// seconds. Thumbnails are optional, so this never blocks startup.
 if !CGPreflightScreenCaptureAccess() {
-    log("no Screen Recording permission - thumbnails will be blank.")
-    log("requesting it now; approve the prompt (or add this binary in")
-    log("System Settings > Privacy & Security > Screen Recording), then relaunch.")
+    log("no Screen Recording permission - tiles will render blank until it is granted in")
+    log("System Settings > Privacy & Security > Screen Recording.")
     CGRequestScreenCaptureAccess()
 }
 
@@ -230,17 +231,11 @@ if let index = CommandLine.arguments.firstIndex(of: "--show") {
     app.run()
 }
 
-guard AXIsProcessTrusted() else {
-    let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-    _ = AXIsProcessTrustedWithOptions(opts)
-    log("not yet trusted for Accessibility - approve it, then relaunch.")
-    exit(1)
-}
-
 let mask: CGEventMask =
     (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.flagsChanged.rawValue)
 
-guard let tap = CGEvent.tapCreate(
+func makeEventTap() -> CFMachPort? {
+    CGEvent.tapCreate(
     tap: .cghidEventTap,
     place: .headInsertEventTap,
     options: .defaultTap,
@@ -290,12 +285,45 @@ guard let tap = CGEvent.tapCreate(
         }
     },
     userInfo: nil
-) else {
-    log("failed to create event tap - grant Input Monitoring, then relaunch.")
-    exit(1)
+    )
 }
 
-CFRunLoopAddSource(CFRunLoopGetCurrent(), CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0), .commonModes)
-CGEvent.tapEnable(tap: tap, enable: true)
-log("running (pid \(ProcessInfo.processInfo.processIdentifier))")
+/// Waits for the permissions we need rather than exiting without them.
+///
+/// Exiting was the bug behind the permission-dialog spam: launchd keeps this agent alive, so
+/// every exit meant a relaunch a few seconds later, and every relaunch asked again. Staying up
+/// and re-checking quietly means the dialog appears once, and granting it takes effect on its
+/// own without anything having to be restarted by hand.
+var askedForAccessibility = false
+var reportedTapFailure = false
+
+func startWhenPermitted() {
+    guard AXIsProcessTrusted() else {
+        if !askedForAccessibility {
+            askedForAccessibility = true
+            let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+            _ = AXIsProcessTrustedWithOptions(opts)
+            log("waiting for Accessibility permission (System Settings > Privacy & Security)")
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { startWhenPermitted() }
+        return
+    }
+
+    guard let tap = makeEventTap() else {
+        if !reportedTapFailure {
+            reportedTapFailure = true
+            log("waiting for Input Monitoring permission (System Settings > Privacy & Security)")
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { startWhenPermitted() }
+        return
+    }
+
+    CFRunLoopAddSource(CFRunLoopGetCurrent(),
+                       CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0),
+                       .commonModes)
+    CGEvent.tapEnable(tap: tap, enable: true)
+    log("running (pid \(ProcessInfo.processInfo.processIdentifier))")
+}
+
+startWhenPermitted()
 app.run()
