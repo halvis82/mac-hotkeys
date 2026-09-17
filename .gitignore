@@ -1,0 +1,8 @@
+# Compiled binaries and build output
+build/
+tools/sniff-key
+tools/intercept-test
+tools/synth-key
+
+# Captured event logs (sniff-key records raw keystrokes)
+*.log
