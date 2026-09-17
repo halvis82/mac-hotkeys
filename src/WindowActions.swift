@@ -95,15 +95,25 @@ enum WindowActions {
             return
         }
 
-        // Same app, different Space, which is every Cmd+backtick press. Its Window menu is
-        // immediate and names the exact window, so there is nothing to wait for.
+        // Same app, different Space, which is every Cmd+backtick press between fullscreen
+        // windows. The app is frontmost by definition, so its Window menu is readable and names
+        // the exact window. Roughly 4ms to find and press.
         let app = NSRunningApplication(processIdentifier: window.pid)
         if app?.isActive == true, selectViaWindowMenu(window: window) {
             trace("navigated via Window menu", sky, window)
             return
         }
 
-        // Another app: activating it is the only thing that can leave a fullscreen Space.
+        // Another app: activation is the only thing that can leave a fullscreen Space.
+        //
+        // The window server switch would move instantly instead of spending macOS's ~450ms on
+        // the animation, and that is exactly what this used to do. It cannot be used. Entering a
+        // fullscreen Space that way leaves it half-entered, after which nothing can leave it and
+        // later switches draw windows on top of stale fullscreen content. Three ways of healing
+        // it afterwards were tried and measured: activating the app in place, raising the target
+        // window first and then re-activating, and both combined. Each still ended poisoned
+        // within a few presses. The speed and a working window server turned out to be the same
+        // trade, so the animation stays.
         openLikeDock(pid: window.pid)
         correctWindowOnceFrontmost(window: window, space: space, sky: sky,
                                    deadline: Date().addingTimeInterval(1.5))
