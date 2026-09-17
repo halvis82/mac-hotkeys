@@ -95,6 +95,14 @@ final class SkyLight {
         orderedSpaces().first { $0.id == id }
     }
 
+    /// Deliberately unused for navigation.
+    ///
+    /// Moving *into* a fullscreen Space this way leaves it half-entered: macOS stops treating it
+    /// as properly current, and from then on nothing can leave it. Activating another app then
+    /// draws it over the stale fullscreen content while the Space refuses to change, and the
+    /// state persists until the Dock is restarted. Navigation goes through LaunchServices and
+    /// the app's Window menu instead. Kept only because the Space list it belongs to is still
+    /// used for ordering the switcher.
     func switchTo(space: SpaceInfo) {
         setCurrentSpace(connectionID, space.displayUUID as CFString, space.id)
     }

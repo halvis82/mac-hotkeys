@@ -127,11 +127,73 @@ enum WindowActions {
             return
         }
 
-        // Fullscreen target: the window server switch is right here, and is the only way to pick
-        // a *particular* fullscreen window when an app owns several on different Spaces.
-        sky.switchTo(space: space)
-        trace("after navigation", sky, window)
-        waitForTransition(window: window, space: space, sky: sky, deadline: deadline)
+        // Fullscreen target. Activating the app lands on one of its fullscreen Spaces properly;
+        // if that isn't the one asked for, its own Window menu is used to reach the exact
+        // window, which macOS navigates itself.
+        openLikeDock(pid: window.pid)
+        selectExactWindowOnceSettled(window: window, space: space, sky: sky)
+    }
+
+    /// Picks a window through its app's own Window menu.
+    ///
+    /// This exists because `SLSManagedDisplaySetCurrentSpace` cannot be used to *enter* a
+    /// fullscreen Space. Doing so leaves that Space half-entered: macOS stops treating it as
+    /// properly current, so afterwards nothing can leave it. Activating a desktop app then draws
+    /// it on top of the stale fullscreen content while the Space silently refuses to change,
+    /// which is the "app opened over my fullscreen window" bug in its final form. Once a Space
+    /// is in that state it stays there until the Dock is restarted.
+    ///
+    /// Going through the Window menu is how macOS itself moves to a window on another fullscreen
+    /// Space, and it leaves everything healthy.
+    @discardableResult
+    private static func selectViaWindowMenu(window: WindowInfo) -> Bool {
+        let title = window.title.trimmingCharacters(in: .whitespaces)
+        guard !title.isEmpty else { return false }
+
+        let app = appElement(pid: window.pid)
+        AXUIElementSetMessagingTimeout(app, 1.0)
+
+        func children(_ element: AXUIElement, _ attribute: String) -> [AXUIElement] {
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success
+            else { return [] }
+            return (value as? [AXUIElement]) ?? []
+        }
+        func label(_ element: AXUIElement) -> String {
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(element, kAXTitleAttribute as CFString, &value) == .success
+            else { return "" }
+            return (value as? String) ?? ""
+        }
+
+        var barValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, kAXMenuBarAttribute as CFString, &barValue) == .success,
+              let menuBar = barValue as! AXUIElement?
+        else { return false }
+
+        for item in children(menuBar, kAXChildrenAttribute as String) where label(item) == "Window" {
+            for menu in children(item, kAXChildrenAttribute as String) {
+                for entry in children(menu, kAXChildrenAttribute as String)
+                where label(entry).hasPrefix(title) {
+                    return AXUIElementPerformAction(entry, kAXPressAction as CFString) == .success
+                }
+            }
+        }
+        return false
+    }
+
+    /// After activating the app, nudges it onto the exact window that was asked for, if
+    /// activation landed somewhere else. Only relevant for apps owning several fullscreen
+    /// windows; for everything else the activation already did the job.
+    private static func selectExactWindowOnceSettled(window: WindowInfo,
+                                                     space: SpaceInfo,
+                                                     sky: SkyLight) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) {
+            guard sky.activeSpace != space.id else { return }
+            if !selectViaWindowMenu(window: window) {
+                log("could not reach \(window.appName) window \"\(window.title)\" via its Window menu")
+            }
+        }
     }
 
     /// Whether this app owns any window on a Space other than `space`, which is what makes a

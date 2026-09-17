@@ -140,7 +140,16 @@ final class SwitcherController {
 
         if verbose { log("commit -> \(window.appName) wid=\(window.id) space=\(tile.space.id)") }
         mru.record(window.id)
-        WindowActions.activate(window: window, space: tile.space, sky)
+
+        // Let the overlay actually leave the screen before anything moves Spaces. The panel
+        // joins every Space and sits above fullscreen windows, and starting a Space change in
+        // the same breath as tearing it down leaves the window server drawing the Space we came
+        // from: the new window appears over the old fullscreen app even though the Space really
+        // did change underneath. One turn of the run loop plus a beat is enough to separate them.
+        let sky = self.sky
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            WindowActions.activate(window: window, space: tile.space, sky)
+        }
     }
 }
 
