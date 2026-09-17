@@ -78,11 +78,10 @@ private func windows(forPID pid: pid_t, _ sky: SkyLight) -> [AppWindow] {
             // (Notes does this), either of which would otherwise wedge the cycle on a press
             // that appears to succeed but moves nothing.
             if !raisable.contains(id) { continue }
-        } else if let bounds = entry[kCGWindowBounds as String] as? [String: Any],
-                  let w = bounds["Width"] as? Double, let h = bounds["Height"] as? Double,
-                  w < 200 || h < 200 {
-            continue
         }
+        // No size test for windows on other Spaces: Stage Manager parks windows and the window
+        // server then reports their shrunken bounds, so filtering on size drops real windows.
+        // Having a Space, which is checked above, is the reliable signal.
 
         result.append(AppWindow(id: id,
                                 space: space,
@@ -130,28 +129,6 @@ private func raise(windowID target: CGWindowID, ofPID pid: pid_t, verbose: Bool 
     return false
 }
 
-/// Activates the app and raises the window, retrying until it shows up.
-///
-/// A window on another Space is absent from the app's AX list until that Space finishes becoming
-/// current, and how long that takes depends on the Space-switch animation. Polling for it beats
-/// any fixed delay, which is either too short (the raise silently does nothing and the cycle
-/// never advances) or needlessly slow on every press.
-private func raiseWhenAvailable(windowID target: CGWindowID,
-                                ofPID pid: pid_t,
-                                app: NSRunningApplication,
-                                verbose: Bool,
-                                deadline: Date) {
-    app.activate()
-    if raise(windowID: target, ofPID: pid, verbose: verbose) { return }
-    guard Date() < deadline else {
-        log("gave up raising wid=\(target): never appeared in the AX window list")
-        return
-    }
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) {
-        raiseWhenAvailable(windowID: target, ofPID: pid, app: app, verbose: verbose, deadline: deadline)
-    }
-}
-
 // MARK: - The action
 
 func cycleWindow(_ sky: SkyLight, dryRun: Bool, target: NSRunningApplication? = nil) {
@@ -173,22 +150,23 @@ func cycleWindow(_ sky: SkyLight, dryRun: Bool, target: NSRunningApplication? = 
         + "\"\(next.title)\"\(dryRun ? " [DRY RUN]" : "")")
     if dryRun { return }
 
-    let verbose = CommandLine.arguments.contains("--verbose")
-    func trace(_ what: String) {
-        if verbose { log("  [\(what)] activeSpace=\(sky.activeSpace)") }
+    // Hand over to the switcher's activation, rather than switching Spaces here. Cycling can
+    // land on a window sitting on the desktop just as easily as on a fullscreen one, and
+    // leaving a fullscreen Space with the window server directly draws the target on top of the
+    // fullscreen app instead of travelling to the desktop. That path knows the difference.
+    guard let targetSpace = sky.spaceInfo(id: next.space) else {
+        log("no Space \(next.space) for wid=\(next.id)")
+        return
     }
-
-    if next.space != activeSpace, let target = sky.spaceInfo(id: next.space) {
-        sky.switchTo(space: target)
-        trace("after switchTo")
-    }
-    raiseWhenAvailable(windowID: next.id,
-                       ofPID: pid,
-                       app: app,
-                       verbose: verbose,
-                       deadline: Date().addingTimeInterval(2.0))
-    if verbose {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { trace("+1.0s") }
-    }
+    WindowActions.activate(
+        window: WindowInfo(id: next.id,
+                           pid: pid,
+                           appName: app.localizedName ?? "",
+                           appKey: app.bundleIdentifier ?? "pid:\(pid)",
+                           title: next.title,
+                           bounds: .zero,
+                           isMinimized: false),
+        space: targetSpace,
+        sky)
 }
 
