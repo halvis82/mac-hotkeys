@@ -123,9 +123,15 @@ enum WindowLister {
                 CGRectMakeWithDictionaryRepresentation(boundsDict as CFDictionary, &rect)
             }
 
-            // Anything this small is a helper window, never something to switch to.
-            if rect.width < 200 || rect.height < 200 { continue }
-
+            // Deliberately no size test. Stage Manager parks the windows of apps outside the
+            // current stage and the window server then reports their *shrunken* bounds: a real
+            // 1200x800 VS Code window comes back as 131x140, and Finder windows as 108x131.
+            // Filtering on size therefore deletes precisely the windows this is for, leaving
+            // only whichever app happens to be in the active stage at full size.
+            //
+            // Having a Space is the discriminator instead. Every piece of junk apps keep around
+            // (1512x33 strips, 64x64 stubs, offscreen 1x1s) is placed on no Space at all, while
+            // every genuine window belongs to one.
             let space = sky.space(ofWindow: id)
             let minimized: Bool
 
