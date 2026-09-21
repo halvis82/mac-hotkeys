@@ -3,41 +3,47 @@
 ## Where it lives
 
 - `src/FocusToggle.swift` — all of the Focus logic (state read, tap vs hold, Shortcuts calls).
-- `src/main.swift:14` — `dndKeyCode = 178` (F6 without Fn).
-- `src/main.swift:108-116` — the event tap catches F6 keyDown/keyUp, forwards them to
-  `handleKeyDown()` / `handleKeyUp()`, and returns `nil` so the system's own DND toggle
-  never sees the key.
+- `src/main.swift` — `dndKeyCode = 178` (F6 without Fn). The event tap catches F6 keyDown/keyUp,
+  forwards them to `handleKeyDown()` / `handleKeyUp()`, and returns `nil` so the system's own
+  DND toggle never sees the key.
 
-## Current behavior
+## Behavior
 
-Both gestures already short-circuit to "off" when anything is active:
+- **tap** → if any Focus is active, turn it off. Otherwise turn on Do Not Disturb.
+- **hold** (0.35s) → if any Focus is active, turn it off. Otherwise turn on the "Nothing" Focus.
 
-- `onTap()` (`src/FocusToggle.swift:70`) → `isAnyFocusActive() ? "dnd/nothing off" : "dnd on"`
-- `onHold()` (`src/FocusToggle.swift:75`, fires after 0.35 s) → `isAnyFocusActive() ? "dnd/nothing off" : "nothing on"`
+Both run one of three Shortcuts: `dnd on`, `nothing on`, `dnd/nothing off`. Shortcuts is the only
+public way to set a Focus; see README for why.
 
-So the requested rule (any mode enabled → pressing moon disables it) is what's coded today. ✅
+## Reading the current state
 
-`isAnyFocusActive()` reads `~/Library/DoNotDisturb/DB/Assertions.json` directly and counts
-`data[0].storeAssertionRecords`. Non-empty means some Focus holds an assertion. Undocumented
-but instant, and it fails safe (unreadable or unexpected shape → treated as "no Focus active").
+`readFocusState()` reads `~/Library/DoNotDisturb/DB/Assertions.json` and counts
+`data[0].storeAssertionRecords`. Non-empty means some Focus holds an assertion.
 
-## Status of the pieces
+That file needs **Full Disk Access**. Crucially, a failed read and an empty file are *not* the
+same thing, and conflating them is what made the key turn DND on every single time instead of
+toggling it off. `readFocusState()` therefore returns nil when it cannot read, and
+`isAnyFocusActive()` falls back to `lastKnownFocusActive`, which is updated after every shortcut
+that succeeds.
 
-| Piece | State |
+So the key toggles correctly **without** Full Disk Access. The grant only matters if Focus is
+also changed from somewhere else (Control Center, a schedule), because then the local guess
+drifts until the next successful read.
+
+## Things that bite
+
+| Trap | What happens |
 | --- | --- |
-| Key interception (F6 swallowed at HID level) | ✅ in place |
-| Tap → DND on, or off if anything active | ✅ implemented |
-| Hold → Nothing on, or off if anything active | ✅ implemented |
-| Shortcuts present on this machine (`dnd on`, `nothing on`, `dnd/nothing off`) | ✅ all three listed by `shortcuts list` |
-| Full Disk Access (needed to read the TCC-protected assertions file) | ⚠️ must be granted to the built app, else `isAnyFocusActive()` always returns false and the key only ever turns Focus *on* |
-| "Off" covering modes other than DND/Nothing (Sleep, Work, Personal, …) | ⚠️ depends on how the `dnd/nothing off` Shortcut is built. A "Turn Focus Off" action with no specific mode clears whatever is active; one pinned to a specific mode would not |
+| Treating an unreadable assertions file as "no Focus active" | Key only ever turns Focus *on* |
+| Waiting on `shortcuts run` without a timeout | It hangs outright sometimes. These run on one serial queue, so one hang blocks every later press and the key goes dead until the agent restarts. A watchdog kills it after 4s |
+| Requesting Screen Recording at launch | The moon key has nothing to do with the screen, but the prompt appeared anyway. It is now requested lazily, the first time a switcher preview is drawn |
+| `dnd/nothing off` pinned to a specific mode | "Off" would not clear Sleep, Work, Personal and so on. The Shortcut needs a plain "Turn Focus Off" |
 
 ## If it misbehaves
 
-1. The most likely cause of "it turns DND on instead of off" is the assertions read failing,
-   which is Full Disk Access going stale after a rebuild (see the signing section in
-   `README.md` — ad-hoc signatures invalidate the grant on every build).
-2. Second most likely: the `dnd/nothing off` Shortcut is configured for a specific mode
-   rather than "Turn Focus Off" generally.
-3. `log()` output records every shortcut run and every assertions-read failure, so the log
-   distinguishes these two immediately.
+`log()` records every shortcut run, every hang it kills, and once per launch whether the
+assertions file was readable:
+
+```sh
+tail -f ~/Library/Logs/com.halvor.machotkeys.log
+```
