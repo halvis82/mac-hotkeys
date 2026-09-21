@@ -20,19 +20,21 @@ final class SwitcherView: NSView {
     var onHover: ((Int, Int?) -> Void)?
     var onClick: ((Int, Int?) -> Void)?
 
-    static let tileHeight: CGFloat = 132
-    static let gap: CGFloat = 14
-    static let padding: CGFloat = 20
-    static let labelHeight: CGFloat = 26
-    static let corner: CGFloat = 10
+    static let tileHeight: CGFloat = 190
+    static let gap: CGFloat = 16
+    static let padding: CGFloat = 24
+    static let labelHeight: CGFloat = 30
+    static let corner: CGFloat = 12
+    /// Room under the icon for the number you can press to jump straight to a tile.
+    static let badgeHeight: CGFloat = 20
 
-    private(set) var tileWidth: CGFloat = 208
+    private(set) var tileWidth: CGFloat = 300
 
     /// Tiles shrink rather than overflow when there are a lot of windows, the same way the
     /// system switcher shrinks its icons.
     func layoutSize(maxWidth: CGFloat) -> NSSize {
         let count = max(tiles.count, 1)
-        tileWidth = 208
+        tileWidth = 300
         var width = Self.padding * 2 + CGFloat(count) * tileWidth + CGFloat(count - 1) * Self.gap
         if width > maxWidth {
             let available = maxWidth - Self.padding * 2 - CGFloat(count - 1) * Self.gap
@@ -53,8 +55,8 @@ final class SwitcherView: NSView {
     /// Icon positions inside a desktop tile, laid out as a centered grid.
     private func iconRects(count: Int, in rect: NSRect) -> [NSRect] {
         guard count > 0 else { return [] }
-        let iconSize: CGFloat = min(38, rect.width / 5.2)
-        let spacing: CGFloat = 7
+        let iconSize: CGFloat = min(52, rect.width / 5.2)
+        let spacing: CGFloat = 9
         let perRow = max(1, min(count, Int((rect.width - 16) / (iconSize + spacing))))
         let rows = Int(ceil(Double(count) / Double(perRow)))
         let gridHeight = CGFloat(rows) * iconSize + CGFloat(rows - 1) * spacing
@@ -143,10 +145,13 @@ final class SwitcherView: NSView {
             case .window(_, let window):
                 drawAppIcon(window.icon, at: rect)
             case .desktop(let space, let windows):
+                // No single app icon here: the grid already shows every app on this desktop,
+                // and drawing one on top of it just obscured the grid.
                 drawIconGrid(windows,
                              in: rect,
                              selectedIndex: index == selected ? (desktopSelection[space.id] ?? 0) : -1)
             }
+            drawNumber(index, in: rect)
         }
 
         drawLabel()
@@ -196,8 +201,11 @@ final class SwitcherView: NSView {
 
     private func drawAppIcon(_ icon: NSImage?, at rect: NSRect) {
         guard let icon = icon else { return }
-        let size: CGFloat = min(42, rect.width * 0.28)
-        let iconRect = NSRect(x: rect.minX + 7, y: rect.minY + 7, width: size, height: size)
+        let size: CGFloat = min(56, rect.width * 0.22)
+        let iconRect = NSRect(x: rect.minX + 10,
+                              y: rect.minY + 10 + Self.badgeHeight,
+                              width: size,
+                              height: size)
         NSGraphicsContext.current?.saveGraphicsState()
         let shadow = NSShadow()
         shadow.shadowColor = NSColor.black.withAlphaComponent(0.55)
@@ -230,6 +238,29 @@ final class SwitcherView: NSView {
         }
     }
 
+    /// The number that jumps straight to this tile, sitting under the app icon.
+    private func drawNumber(_ index: Int, in rect: NSRect) {
+        guard index < 9 else { return } // only 1-9 are reachable from the keyboard
+        let text = "\(index + 1)"
+        let font = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .semibold)
+        let size = (text as NSString).size(withAttributes: [.font: font])
+        let iconWidth = min(56, rect.width * 0.22)
+        let centre = rect.minX + 10 + iconWidth / 2
+        let box = NSRect(x: centre - max(size.width, 12) / 2 - 6,
+                         y: rect.minY + 6,
+                         width: max(size.width, 12) + 12,
+                         height: Self.badgeHeight - 4)
+        let pill = NSBezierPath(roundedRect: box, xRadius: 5, yRadius: 5)
+        NSColor.black.withAlphaComponent(0.7).setFill()
+        pill.fill()
+        NSColor.white.withAlphaComponent(0.25).setStroke()
+        pill.lineWidth = 1
+        pill.stroke()
+        (text as NSString).draw(at: NSPoint(x: centre - size.width / 2, y: box.minY + 0.5),
+                                withAttributes: [.font: font,
+                                                 .foregroundColor: NSColor.white.withAlphaComponent(0.95)])
+    }
+
     private func drawLabel() {
         guard let window = currentWindow() else { return }
         let text = window.title.isEmpty ? window.appName : "\(window.appName) - \(window.title)"
@@ -237,7 +268,7 @@ final class SwitcherView: NSView {
         style.alignment = .center
         style.lineBreakMode = .byTruncatingTail
         let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 13, weight: .medium),
+            .font: NSFont.systemFont(ofSize: 15, weight: .medium),
             .foregroundColor: NSColor.white.withAlphaComponent(0.92),
             .paragraphStyle: style,
         ]

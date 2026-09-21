@@ -17,6 +17,9 @@ let tabKeyCode: Int64 = 48
 let escKeyCode: Int64 = 53
 let leftArrowKeyCode: Int64 = 123
 let rightArrowKeyCode: Int64 = 124
+/// Virtual key codes for 1...9, in order, on both the number row and the keypad.
+let digitKeyCodes: [Int64] = [18, 19, 20, 21, 23, 22, 26, 28, 25]
+let keypadDigitKeyCodes: [Int64] = [83, 84, 85, 86, 87, 88, 89, 91, 92]
 
 guard let sky = SkyLight() else {
     log("could not resolve SkyLight symbols - macOS may have changed them")
@@ -64,14 +67,6 @@ if let index = CommandLine.arguments.firstIndex(of: "--show") {
     Runtime.switcher.open(backwards: false)
     DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { exit(0) }
     app.run()
-}
-
-// Thumbnails are optional, so a missing grant is reported once and never blocks startup.
-// Asking is limited to one attempt per launch: launchd keeps this agent alive, so prompting
-// on a loop is what turned a single missing grant into a dialog every few seconds.
-if !CGPreflightScreenCaptureAccess() {
-    log("no Screen Recording permission - switcher tiles will render blank until granted")
-    CGRequestScreenCaptureAccess()
 }
 
 // MARK: - The one event tap
@@ -155,6 +150,11 @@ func makeEventTap() -> CFMachPort? {
                 return nil
             case rightArrowKeyCode:
                 DispatchQueue.main.async { switcher.moveWithinDesktop(by: 1) }
+                return nil
+            case _ where digitKeyCodes.contains(code) || keypadDigitKeyCodes.contains(code):
+                let position = digitKeyCodes.firstIndex(of: code)
+                    ?? keypadDigitKeyCodes.firstIndex(of: code)!
+                DispatchQueue.main.async { switcher.select(position: position) }
                 return nil
             default:
                 return Unmanaged.passUnretained(event)

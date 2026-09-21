@@ -8,7 +8,7 @@ driving all three hotkeys. No dock icon, no menu bar item, no UI at all.
 |---|---|
 | **F6** (moon key) | Tap toggles Do Not Disturb, hold turns on the "Nothing" Focus, and if any Focus is on, either gesture turns it off. |
 | **Cmd+`** | Cycles between windows of the front app, including ones fullscreened into their own Space (which macOS's built-in version skips). |
-| **Cmd+Tab** | A switcher listing **windows** instead of apps, with previews, ordered by where things actually are. |
+| **Cmd+Tab** | A switcher listing **windows** instead of apps, with previews, ordered by where things actually are. Tab/Shift+Tab to move, **1-9** to jump straight to a tile, arrows to pick an app inside a desktop tile, Esc to cancel, release Cmd to go. |
 
 ```sh
 ./install.sh
@@ -19,10 +19,13 @@ driving all three hotkeys. No dock icon, no menu bar item, no UI at all.
 One app, so permissions are granted once:
 
 - **Accessibility** — required for everything
-- **Screen Recording** — switcher previews only. Fails quietly: without it tiles render blank
+- **Screen Recording** — switcher previews only, and asked for only the first time a preview is
+  actually drawn, so using the moon key alone never raises a screen prompt. Fails quietly: without it tiles render blank
   while everything else keeps working, and `CGPreflightScreenCaptureAccess()` can even report
   `true` while captures are being refused, so trust the tiles rather than the API.
-- **Full Disk Access** — reading which Focus is active, since that file is TCC-protected.
+- **Full Disk Access** — optional, and only for the moon key. The file saying which Focus is
+  active is TCC-protected; without the grant the key tracks the state itself, which toggles
+  correctly unless Focus is also changed from Control Center. Granting it makes that exact.
 
 Input Monitoring is *not* needed in practice; Accessibility covers the event tap.
 

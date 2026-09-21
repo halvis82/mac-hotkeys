@@ -19,62 +19,94 @@ private let assertionsPath =
     NSHomeDirectory() + "/Library/DoNotDisturb/DB/Assertions.json"
 
 
-/// True if any Focus mode is currently active, read straight from the DB file
-/// donotdisturbd maintains. This is undocumented but immediate (no process
-/// spawn), and was verified empirically to reflect state changes within
-/// milliseconds. If Apple changes this file's layout in a future macOS this
-/// will need updating - it fails safe (treats unreadable/unexpected data as "no focus active").
-private func isAnyFocusActive() -> Bool {
+/// What we last set the Focus to ourselves, used when the authoritative file cannot be read.
+private var lastKnownFocusActive = false
+private var reportedUnreadableAssertions = false
+
+/// Whether any Focus is currently on, read from the file donotdisturbd maintains.
+/// Returns nil when that file cannot be read, which is a different thing from "no Focus".
+private func readFocusState() -> Bool? {
     do {
         let data = try Data(contentsOf: URL(fileURLWithPath: assertionsPath))
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let entries = json["data"] as? [[String: Any]],
               let first = entries.first,
               let records = first["storeAssertionRecords"] as? [[String: Any]]
-        else {
-            log("assertions file parsed but had unexpected shape")
-            return false
-        }
+        else { return nil }
         return !records.isEmpty
     } catch {
-        log("cannot read assertions file: \(error)")
-        return false
+        return nil
     }
+}
+
+/// True if any Focus mode is currently active.
+///
+/// The file is authoritative but sits behind Full Disk Access. Without that grant the read
+/// fails, and treating the failure as "nothing is active" is what made the moon key turn Do Not
+/// Disturb *on* every time instead of toggling it off. So when the file is unreadable we fall
+/// back to what we last set ourselves, which toggles correctly as long as Focus isn't also being
+/// changed from Control Center. Granting Full Disk Access makes it exact again.
+private func isAnyFocusActive() -> Bool {
+    if let state = readFocusState() {
+        lastKnownFocusActive = state
+        return state
+    }
+    if !reportedUnreadableAssertions {
+        reportedUnreadableAssertions = true
+        log("cannot read Focus state (needs Full Disk Access); tracking it locally instead")
+    }
+    return lastKnownFocusActive
 }
 
 private let actionQueue = DispatchQueue(label: "focustoggle.action")
 
-private func runShortcut(_ name: String) {
+/// Runs one of the Focus shortcuts, and refuses to wait forever for it.
+///
+/// `shortcuts run` hangs outright sometimes: the process sits there indefinitely with the
+/// shortcut never firing. Because these run on one serial queue, a single hang used to block
+/// every later press of the key, so the moon key simply stopped responding until the agent was
+/// restarted. Anything still running after a few seconds is killed so the queue keeps moving.
+private func runShortcut(_ name: String, marking active: Bool) {
     let task = Process()
     task.executableURL = URL(fileURLWithPath: "/usr/bin/shortcuts")
     task.arguments = ["run", name]
     task.standardOutput = FileHandle.nullDevice
-    let errPipe = Pipe()
-    task.standardError = errPipe
+    task.standardError = FileHandle.nullDevice
     do {
         try task.run()
     } catch {
         log("failed to launch shortcuts run \"\(name)\": \(error)")
         return
     }
+
+    let watchdog = DispatchWorkItem {
+        if task.isRunning {
+            log("shortcut \"\(name)\" hung; killing it")
+            task.terminate()
+        }
+    }
+    DispatchQueue.global().asyncAfter(deadline: .now() + 4, execute: watchdog)
     task.waitUntilExit()
-    if task.terminationStatus != 0 {
-        let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-        let errText = String(data: errData, encoding: .utf8) ?? ""
-        log("shortcut \"\(name)\" exited \(task.terminationStatus): \(errText)")
-    } else {
+    watchdog.cancel()
+
+    if task.terminationStatus == 0 {
+        lastKnownFocusActive = active
         log("ran shortcut \"\(name)\"")
+    } else {
+        log("shortcut \"\(name)\" exited \(task.terminationStatus)")
     }
 }
 
 private func onTap() {
-    let name = isAnyFocusActive() ? shortcutFocusOff : shortcutFocusOn
-    actionQueue.async { runShortcut(name) }
+    let active = isAnyFocusActive()
+    let name = active ? shortcutFocusOff : shortcutFocusOn
+    actionQueue.async { runShortcut(name, marking: !active) }
 }
 
 private func onHold() {
-    let name = isAnyFocusActive() ? shortcutFocusOff : shortcutNothingOn
-    actionQueue.async { runShortcut(name) }
+    let active = isAnyFocusActive()
+    let name = active ? shortcutFocusOff : shortcutNothingOn
+    actionQueue.async { runShortcut(name, marking: !active) }
 }
 
 // MARK: - Key handling

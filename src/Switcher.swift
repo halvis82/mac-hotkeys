@@ -121,6 +121,16 @@ final class SwitcherController {
         panel.refresh(selected: selected, desktopSelection: desktopSelection)
     }
 
+    /// Jumps straight to the tile with the given number, as printed under its icon. The
+    /// selection still commits on releasing Command, so a mistyped number can be corrected
+    /// with another number, Tab, or Escape.
+    func select(position: Int) {
+        guard isOpen, tiles.indices.contains(position) else { return }
+        selected = position
+        if verbose { log("number key -> tile \(position + 1)/\(tiles.count)") }
+        panel.refresh(selected: selected, desktopSelection: desktopSelection)
+    }
+
     func cancel() {
         guard isOpen else { return }
         if verbose { log("cancelled, staying put") }

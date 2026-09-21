@@ -1,7 +1,24 @@
 import Cocoa
 
 enum Thumbnails {
+    private static var askedForScreenRecording = false
+
+    /// Asked for only when a thumbnail is actually wanted, never at startup.
+    ///
+    /// Only the Cmd+Tab previews need to read the screen. Requesting it when the agent launches
+    /// meant using the moon key, which has nothing to do with the screen, still put up a screen
+    /// recording prompt. Limited to one attempt per launch, because launchd keeps this agent
+    /// alive and prompting on a loop turns one missing grant into a dialog every few seconds.
+    private static func ensureScreenRecordingRequested() {
+        guard !askedForScreenRecording else { return }
+        askedForScreenRecording = true
+        guard !CGPreflightScreenCaptureAccess() else { return }
+        log("no Screen Recording permission - switcher tiles will render blank until granted")
+        CGRequestScreenCaptureAccess()
+    }
+
     static func image(for window: WindowInfo, _ sky: SkyLight) -> NSImage? {
+        ensureScreenRecordingRequested()
         guard let cgImage = sky.capture(windowID: window.id) else { return nil }
         return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
     }
@@ -26,6 +43,7 @@ enum Thumbnails {
     /// the Space's wallpaper with that Space's windows composited on top at their real
     /// positions, which is what makes the tile actually look like that desktop.
     static func desktopPreview(space: SpaceInfo, windows: [WindowInfo], _ sky: SkyLight) -> NSImage? {
+        ensureScreenRecordingRequested()
         let screen = NSScreen.main ?? NSScreen.screens[0]
         let canvas = screen.frame.size
 
