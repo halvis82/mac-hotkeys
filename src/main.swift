@@ -7,8 +7,15 @@ import Cocoa
 // time anything was rebuilt. They share most of their machinery anyway, so they are now a
 // single process with a single event tap: grant it once and everything works.
 
+private let logClock: DateFormatter = {
+    let f = DateFormatter()
+    f.dateFormat = "HH:mm:ss"
+    return f
+}()
+
 func log(_ message: String) {
-    FileHandle.standardError.write("mac-hotkeys: \(message)\n".data(using: .utf8)!)
+    let line = "\(logClock.string(from: Date())) mac-hotkeys: \(message)\n"
+    FileHandle.standardError.write(line.data(using: .utf8)!)
 }
 
 let dndKeyCode: Int64 = 178   // F6, the moon key, when Fn is not held

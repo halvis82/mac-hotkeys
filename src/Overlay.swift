@@ -340,7 +340,18 @@ final class OverlayPanel: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 
+    /// Re-applies the traits that let the panel appear over every Space.
+    ///
+    /// Set once at construction they can be lost later, and a panel that has become tied to one
+    /// Space is invisible everywhere else while still reporting itself as a perfectly healthy,
+    /// visible, full-screen window. Cheap enough to simply assert again on every open.
+    func reassertSpaceBehavior() {
+        level = .screenSaver
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+    }
+
     func present(tiles: [Tile], selected: Int, desktopSelection: [UInt64: Int]) {
+        reassertSpaceBehavior()
         switcherView.tiles = tiles
         switcherView.selected = selected
         switcherView.desktopSelection = desktopSelection

@@ -4,7 +4,7 @@ import Cocoa
 /// is held, and acts on the selection when Cmd is let go.
 final class SwitcherController {
     private let sky: SkyLight
-    private let panel = OverlayPanel()
+    private var panel = OverlayPanel()
     private let mru = MRUTracker()
 
     private var tiles: [Tile] = []
@@ -16,7 +16,10 @@ final class SwitcherController {
 
     init(sky: SkyLight) {
         self.sky = sky
+        wirePanel()
+    }
 
+    private func wirePanel() {
         panel.onCancel = { [weak self] in self?.cancel() }
         panel.switcherView.onHover = { [weak self] tile, icon in
             self?.point(atTile: tile, icon: icon, commit: false)
@@ -24,6 +27,12 @@ final class SwitcherController {
         panel.switcherView.onClick = { [weak self] tile, icon in
             self?.point(atTile: tile, icon: icon, commit: true)
         }
+    }
+
+    private func rebuildPanel() {
+        panel.dismiss()
+        panel = OverlayPanel()
+        wirePanel()
     }
 
     /// Mouse selection. Hovering moves the highlight, clicking takes it.
@@ -63,9 +72,23 @@ final class SwitcherController {
             }
         }
 
-        if verbose { log("open: \(tiles.count) tiles, starting on \(selected + 1)") }
+        // A fresh panel every time, rather than nursing one along.
+        //
+        // The reused panel kept ending up invisible while reporting itself perfectly healthy: a
+        // full-screen, opaque, listed window that simply never appeared, which is the menu
+        // failing to show, most often when opening from a fullscreen Space. The window server
+        // said why. A panel that joins every Space should belong to none of them, and the
+        // reused one was reported as tied to a single Space on nearly every open, so from
+        // anywhere else there was nothing to see. Re-applying the collection behavior did not
+        // shake it loose. A panel built fresh is reported on no Space, every time.
+        rebuildPanel()
         isOpen = true
         panel.present(tiles: tiles, selected: selected, desktopSelection: desktopSelection)
+        // One line per open. `winSpace` is the one that matters: anything other than "none"
+        // means the overlay has been tied to a single Space and will be invisible from the
+        // others, which is what the menu-not-appearing bug looked like.
+        log("open: \(tiles.count) tiles, sel \(selected + 1), win=\(panel.windowNumber), "
+            + "winSpace=\(sky.space(ofWindow: CGWindowID(panel.windowNumber)).map(String.init) ?? "none")")
         loadThumbnails()
     }
 
