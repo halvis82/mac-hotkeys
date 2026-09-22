@@ -86,37 +86,67 @@ enum WindowActions {
         NSWorkspace.shared.openApplication(at: url, configuration: configuration)
     }
 
-    static func activate(window: WindowInfo, space: SpaceInfo, _ sky: SkyLight) {
+    static func activate(window: WindowInfo,
+                         space: SpaceInfo,
+                         _ sky: SkyLight,
+                         completion: ((Bool) -> Void)? = nil) {
         trace("commit start, target space \(space.id)", sky, window)
 
-        // Already there: nothing to navigate, just focus it.
+        // Already there: nothing to navigate, just focus it. Raising by window id is exact, so
+        // none of the guessing below is needed.
         guard sky.activeSpace != space.id else {
             focusNow(window: window, space: space, sky: sky, deadline: Date().addingTimeInterval(1.0))
+            completion?(true)
             return
         }
 
         // Same app, different Space, which is every Cmd+backtick press between fullscreen
-        // windows. The app is frontmost by definition, so its Window menu is readable and names
-        // the exact window. Roughly 4ms to find and press.
+        // windows. The app is frontmost by definition, so its Window menu is readable and can
+        // name the window. Roughly 4ms to find and press.
         let app = NSRunningApplication(processIdentifier: window.pid)
-        if app?.isActive == true, selectViaWindowMenu(window: window) {
-            trace("navigated via Window menu", sky, window)
+        let entries = app?.isActive == true ? windowMenuEntries(for: window) : []
+        if !entries.isEmpty {
+            press(entries, from: 0, space: space, sky: sky) { arrived in
+                if arrived {
+                    trace("navigated via Window menu", sky, window)
+                    completion?(true)
+                } else {
+                    log("Window menu did not reach space \(space.id) for \"\(window.title)\"; "
+                        + "falling back to activating the app")
+                    activateApp(window: window, space: space, sky: sky, completion: completion)
+                }
+            }
             return
         }
 
-        // Another app: activation is the only thing that can leave a fullscreen Space.
-        //
-        // The window server switch would move instantly instead of spending macOS's ~450ms on
-        // the animation, and that is exactly what this used to do. It cannot be used. Entering a
-        // fullscreen Space that way leaves it half-entered, after which nothing can leave it and
-        // later switches draw windows on top of stale fullscreen content. Three ways of healing
-        // it afterwards were tried and measured: activating the app in place, raising the target
-        // window first and then re-activating, and both combined. Each still ended poisoned
-        // within a few presses. The speed and a working window server turned out to be the same
-        // trade, so the animation stays.
+        activateApp(window: window, space: space, sky: sky, completion: completion)
+    }
+
+    /// Bring the app forward and then correct which of its windows is showing.
+    ///
+    /// Activation is the only thing that can leave a fullscreen Space.
+    ///
+    /// The window server switch would move instantly instead of spending macOS's ~450ms on the
+    /// animation, and that is exactly what this used to do. It cannot be used. Entering a
+    /// fullscreen Space that way leaves it half-entered, after which nothing can leave it and
+    /// later switches draw windows on top of stale fullscreen content. Three ways of healing it
+    /// afterwards were tried and measured: activating the app in place, raising the target window
+    /// first and then re-activating, and both combined. Each still ended poisoned within a few
+    /// presses. The speed and a working window server turned out to be the same trade, so the
+    /// animation stays.
+    private static func activateApp(window: WindowInfo,
+                                    space: SpaceInfo,
+                                    sky: SkyLight,
+                                    completion: ((Bool) -> Void)?) {
         openLikeDock(pid: window.pid)
         correctWindowOnceFrontmost(window: window, space: space, sky: sky,
                                    deadline: Date().addingTimeInterval(1.5))
+        waitForSpace(space.id, sky: sky, deadline: Date().addingTimeInterval(2.5)) { arrived in
+            if !arrived {
+                log("could not reach space \(space.id) for \(window.appName) wid=\(window.id)")
+            }
+            completion?(arrived)
+        }
     }
 
     /// Activation brings an app forward on whichever Space holds its most recent window, which
@@ -131,30 +161,79 @@ enum WindowActions {
                                                    deadline: Date) {
         if sky.activeSpace == space.id { return } // activation already landed correctly
         guard Date() < deadline else { return }
-        if NSRunningApplication(processIdentifier: window.pid)?.isActive == true,
-           selectViaWindowMenu(window: window) {
-            return
+        if NSRunningApplication(processIdentifier: window.pid)?.isActive == true {
+            let entries = windowMenuEntries(for: window)
+            if !entries.isEmpty {
+                press(entries, from: 0, space: space, sky: sky) { _ in }
+                return
+            }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
             correctWindowOnceFrontmost(window: window, space: space, sky: sky, deadline: deadline)
         }
     }
 
-    /// Picks a window through its app's own Window menu.
+    /// True once the given Space is the current one, or false once we stop waiting.
     ///
-    /// This exists because `SLSManagedDisplaySetCurrentSpace` cannot be used to *enter* a
+    /// How long that takes depends on the direction, which is worth knowing before picking a
+    /// deadline. Measured with the window server polled every 10ms: *entering* a fullscreen
+    /// Space from the Window menu does not register until about 405ms in, at the end of the
+    /// animation. A first attempt at 350ms therefore called a press failed a few tens of
+    /// milliseconds before it landed, and fell back to a second route that then fought the
+    /// first one.
+    private static func waitForSpace(_ id: UInt64,
+                                     sky: SkyLight,
+                                     deadline: Date,
+                                     _ done: @escaping (Bool) -> Void) {
+        if sky.activeSpace == id { done(true); return }
+        guard Date() < deadline else { done(false); return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
+            waitForSpace(id, sky: sky, deadline: deadline, done)
+        }
+    }
+
+    /// Presses Window-menu entries in turn until one actually moves us, because a menu entry is
+    /// only ever a guess at which window it stands for.
+    ///
+    /// Pressing the entry of the window already in front does nothing and looks like nothing, so
+    /// a wrong guess costs a moment rather than doing something visibly wrong.
+    private static func press(_ entries: [AXUIElement],
+                              from index: Int,
+                              space: SpaceInfo,
+                              sky: SkyLight,
+                              _ done: @escaping (Bool) -> Void) {
+        guard index < entries.count else { done(false); return }
+        guard AXUIElementPerformAction(entries[index], kAXPressAction as CFString) == .success else {
+            press(entries, from: index + 1, space: space, sky: sky, done)
+            return
+        }
+        // A second past the measured 405ms, so a busy machine still counts as arrived. Success
+        // returns the moment the Space changes, so this only costs anything when a press really
+        // did go nowhere, which the checkmark ordering already makes rare.
+        waitForSpace(space.id, sky: sky, deadline: Date().addingTimeInterval(1.0)) { arrived in
+            if arrived { done(true) }
+            else { press(entries, from: index + 1, space: space, sky: sky, done) }
+        }
+    }
+
+    /// The Window-menu entries that might be the window we want, best candidate first.
+    ///
+    /// The menu exists because `SLSManagedDisplaySetCurrentSpace` cannot be used to *enter* a
     /// fullscreen Space. Doing so leaves that Space half-entered: macOS stops treating it as
-    /// properly current, so afterwards nothing can leave it. Activating a desktop app then draws
-    /// it on top of the stale fullscreen content while the Space silently refuses to change,
-    /// which is the "app opened over my fullscreen window" bug in its final form. Once a Space
-    /// is in that state it stays there until the Dock is restarted.
+    /// properly current, so afterwards nothing can leave it, and activating a desktop app then
+    /// draws it on top of the stale fullscreen content. Once a Space is in that state it stays
+    /// there until the Dock is restarted. Going through the Window menu is how macOS itself
+    /// moves to a window on another fullscreen Space, and it leaves everything healthy.
     ///
-    /// Going through the Window menu is how macOS itself moves to a window on another fullscreen
-    /// Space, and it leaves everything healthy.
-    @discardableResult
-    private static func selectViaWindowMenu(window: WindowInfo) -> Bool {
+    /// The catch is that a menu offers nothing but titles, and titles are not unique: two empty
+    /// Chrome windows are both called "New Tab". Matching on the title alone pressed the same
+    /// entry whichever of the two was wanted, so Cmd+backtick worked one way and was a silent
+    /// no-op coming back, forever. Two things fix that. A checkmark beside an entry marks the
+    /// window the app considers current, which is by definition never where we are going, so
+    /// those entries are tried last. And the caller verifies the move instead of assuming it.
+    private static func windowMenuEntries(for window: WindowInfo) -> [AXUIElement] {
         let title = window.title.trimmingCharacters(in: .whitespaces)
-        guard !title.isEmpty else { return false }
+        guard !title.isEmpty else { return [] }
 
         let app = appElement(pid: window.pid)
         AXUIElementSetMessagingTimeout(app, 1.0)
@@ -165,9 +244,9 @@ enum WindowActions {
             else { return [] }
             return (value as? [AXUIElement]) ?? []
         }
-        func label(_ element: AXUIElement) -> String {
+        func string(_ element: AXUIElement, _ attribute: String) -> String {
             var value: CFTypeRef?
-            guard AXUIElementCopyAttributeValue(element, kAXTitleAttribute as CFString, &value) == .success
+            guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success
             else { return "" }
             return (value as? String) ?? ""
         }
@@ -175,42 +254,44 @@ enum WindowActions {
         var barValue: CFTypeRef?
         guard AXUIElementCopyAttributeValue(app, kAXMenuBarAttribute as CFString, &barValue) == .success,
               let menuBar = barValue as! AXUIElement?
-        else { return false }
+        else { return [] }
 
-        for item in children(menuBar, kAXChildrenAttribute as String) where label(item) == "Window" {
+        var entries: [AXUIElement] = []
+        for item in children(menuBar, kAXChildrenAttribute as String)
+        where string(item, kAXTitleAttribute as String) == "Window" {
             for menu in children(item, kAXChildrenAttribute as String) {
-                for entry in children(menu, kAXChildrenAttribute as String)
-                where label(entry).hasPrefix(title) {
-                    return AXUIElementPerformAction(entry, kAXPressAction as CFString) == .success
-                }
+                entries.append(contentsOf: children(menu, kAXChildrenAttribute as String))
             }
         }
-        return false
-    }
 
-
-
-    /// Raises a window after the desktop is genuinely showing.
-    ///
-    /// The extra settle on top of the Space check is deliberate: the Space reads as current long
-    /// before the transition finishes, and raising during it is what drags windows across.
-    private static func raiseOnceSettled(window: WindowInfo, space: SpaceInfo, sky: SkyLight) {
-        func attempt(_ remaining: Int) {
-            guard sky.activeSpace == space.id else {
-                guard remaining > 0 else { return }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { attempt(remaining - 1) }
-                return
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
-                guard sky.activeSpace == space.id else { return }
-                NSRunningApplication(processIdentifier: window.pid)?.activate()
-                raise(windowID: window.id, ofPID: window.pid)
-            }
+        // Only the last section of the menu, which is where AppKit puts the window list. The rest
+        // is commands, and their names collide with real window titles: Chrome's Window menu has
+        // a "Downloads" command while a Finder window is often called "Downloads". Searching the
+        // whole menu would press the command. Separators come through as empty-titled entries,
+        // so the window list is everything past the last one.
+        if let lastSeparator = entries.lastIndex(where: { string($0, kAXTitleAttribute as String).isEmpty }) {
+            entries = Array(entries[(lastSeparator + 1)...])
         }
-        attempt(40)
+
+        // An entry matches if it starts with the window title, which covers apps that append to
+        // it, or if it is the title cut short with an ellipsis, which covers menus truncating a
+        // long one. Deliberately not "the title starts with the entry" in general: that would
+        // let the Zoom command claim a window called "Zoom Meeting".
+        let matches = entries.filter {
+            let label = string($0, kAXTitleAttribute as String)
+            guard !label.isEmpty else { return false }
+            if label.hasPrefix(title) { return true }
+            return label.hasSuffix("\u{2026}") && title.hasPrefix(String(label.dropLast()))
+        }
+        // "AXMenuItemMarkChar" spelled out: the constant is not exposed to Swift.
+        let isCurrent = { (entry: AXUIElement) in !string(entry, "AXMenuItemMarkChar").isEmpty }
+        let ordered = matches.filter { !isCurrent($0) } + matches.filter(isCurrent)
+        if matches.count > 1 {
+            log("\(matches.count) Window-menu entries match \"\(title)\"; "
+                + "trying the unchecked one first")
+        }
+        return ordered
     }
-
-
 
     private static func focusNow(window: WindowInfo,
                                  space: SpaceInfo,

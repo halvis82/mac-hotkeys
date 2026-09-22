@@ -81,8 +81,23 @@ tried. Briefly:
   the desktop. Only a Dock-style `NSWorkspace.openApplication` genuinely exits fullscreen, so
   that is what the switcher uses for desktop targets.
 
+- **Reaching a specific window on another fullscreen Space** goes through the app's own Window
+  menu, pressed via Accessibility, because that is how macOS itself does it. The menu offers
+  nothing but titles to identify a window by, and titles are not unique: two empty Chrome windows
+  are both "New Tab", so a title match pressed the same entry whichever one was wanted and
+  Cmd+backtick became a silent no-op in one direction. Two things make it reliable. The checkmark
+  beside an entry marks the window the app considers current, which is never the destination, so
+  unchecked entries are tried first. And only the menu's last section is searched, since that is
+  where AppKit lists windows and the sections above it are commands whose names collide with real
+  window titles (Chrome has a "Downloads" command, Finder often has a "Downloads" window).
+
   Worth knowing if you ever debug this: neither `SLSGetActiveSpace` nor
   `kCGWindowListOptionOnScreenOnly` can tell you what is really on screen. The first reports a
   Space switch ~10ms in while the animation runs for ~400ms more, and the second lists windows
   from other Spaces as "on screen". Both will happily report success while the screen shows
   something else. Verify with a screenshot.
+
+  The 10ms figure is for the private switch call. Going the sanctioned way is the opposite:
+  polled every 10ms, *entering* a fullscreen Space from the Window menu does not register until
+  about 405ms, at the end of the animation. Anything that checks whether a press worked has to
+  allow for that, or it declares failure just before the switch lands.
