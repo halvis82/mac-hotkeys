@@ -40,9 +40,12 @@ enum KeyAction: Equatable {
     }
 }
 
-func routeKey(type: CGEventType, code: Int64, flags: CGEventFlags, switcherOpen: Bool) -> KeyAction {
+func routeKey(type: CGEventType, code: Int64, flags: CGEventFlags, switcherOpen: Bool,
+              focusKeyEnabled: Bool = true) -> KeyAction {
     // --- Focus toggle: the F6 moon key, tap versus hold ---
+    // Left to macOS when the shortcuts it runs are not set up, see FocusShortcuts.
     if code == dndKeyCode, type == .keyDown || type == .keyUp {
+        guard focusKeyEnabled else { return .pass }
         return type == .keyDown ? .focusKeyDown : .focusKeyUp
     }
 

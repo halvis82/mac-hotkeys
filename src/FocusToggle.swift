@@ -61,6 +61,57 @@ private func isAnyFocusActive() -> Bool {
     return lastKnownFocusActive
 }
 
+/// Whether the three shortcuts exist, so the key can be left to macOS until they do.
+///
+/// Anyone who has not made them would otherwise lose the moon key entirely: it would be
+/// swallowed, run shortcuts that do not exist, and never reach macOS's own Do Not Disturb
+/// toggle. Checked in the background at launch and again whenever the key is pressed while they
+/// are missing, so it starts working as soon as they are made, with no restart.
+enum FocusShortcuts {
+    private static let lock = NSLock()
+    private static var installed = false
+    private static var checking = false
+    private static var reportedMissing = false
+
+    static var areInstalled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return installed
+    }
+
+    static func check() {
+        lock.lock()
+        if checking { lock.unlock(); return }
+        checking = true
+        lock.unlock()
+        DispatchQueue.global(qos: .utility).async {
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/bin/shortcuts")
+            task.arguments = ["list"]
+            let output = Pipe()
+            task.standardOutput = output
+            task.standardError = FileHandle.nullDevice
+            var names: Set<String> = []
+            if (try? task.run()) != nil {
+                let data = output.fileHandleForReading.readDataToEndOfFile()
+                task.waitUntilExit()
+                names = Set((String(data: data, encoding: .utf8) ?? "").split(separator: "\n").map(String.init))
+            }
+            let required = [shortcutFocusOn, shortcutNothingOn, shortcutFocusOff]
+            let missing = required.filter { !names.contains($0) }
+            lock.lock()
+            installed = missing.isEmpty
+            checking = false
+            let report = !missing.isEmpty && !reportedMissing
+            if report { reportedMissing = true }
+            lock.unlock()
+            if report {
+                log("F6 left to macOS: Shortcuts \(missing.map { "\"\($0)\"" }.joined(separator: ", ")) not found (see README)")
+            }
+        }
+    }
+}
+
 private let actionQueue = DispatchQueue(label: "focustoggle.action")
 
 /// Runs one of the Focus shortcuts, and refuses to wait forever for it.

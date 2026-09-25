@@ -15,6 +15,11 @@ func keyRoutingTests() {
             }
         }
 
+        test("moon key is left to macOS when its shortcuts are not set up") {
+            expectEqual(routeKey(type: .keyDown, code: dndKeyCode, flags: [], switcherOpen: false, focusKeyEnabled: false), .pass)
+            expectEqual(routeKey(type: .keyUp, code: dndKeyCode, flags: [], switcherOpen: false, focusKeyEnabled: false), .pass)
+        }
+
         test("moon key still counts with modifiers held") {
             expectEqual(routeKey(type: .keyDown, code: dndKeyCode, flags: cmdShift, switcherOpen: false), .focusKeyDown)
         }

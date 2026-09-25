@@ -54,6 +54,8 @@ enum Runtime {
     static var dryRun = false
     static var tap: CFMachPort?
     static var tapThread: Thread?
+    /// Whether the F6 press under way belongs to the agent. Only touched on the tap's thread.
+    static var focusKeyClaimed = true
 }
 Runtime.sky = sky
 Runtime.switcher = SwitcherController(sky: sky)
@@ -68,6 +70,10 @@ if let index = CommandLine.arguments.firstIndex(of: "--show") {
 }
 
 // MARK: - The one event tap
+
+extension CGEvent {
+    var isAutorepeat: Bool { getIntegerValueField(.keyboardEventAutorepeat) != 0 }
+}
 
 let mask: CGEventMask =
     (1 << CGEventType.keyDown.rawValue) |
@@ -115,10 +121,18 @@ func makeEventTap() -> CFMachPort? {
                 SwitcherGate.lower()
                 DispatchQueue.main.async { switcher.cancel() }
             }
+            // Whether F6 is ours is decided when it goes down and kept for when it comes up, so
+            // macOS never sees half a keypress.
+            let code = event.getIntegerValueField(.keyboardEventKeycode)
+            if code == dndKeyCode, type == .keyDown, !event.isAutorepeat {
+                Runtime.focusKeyClaimed = FocusShortcuts.areInstalled
+                if !Runtime.focusKeyClaimed { FocusShortcuts.check() }
+            }
             let action = routeKey(type: type,
-                                  code: event.getIntegerValueField(.keyboardEventKeycode),
+                                  code: code,
                                   flags: event.flags,
-                                  switcherOpen: SwitcherGate.isActive)
+                                  switcherOpen: SwitcherGate.isActive,
+                                  focusKeyEnabled: Runtime.focusKeyClaimed)
             switch action {
             case .pass:
                 break
@@ -204,6 +218,7 @@ func startWhenPermitted() {
     Runtime.tapThread = tapThread
     log("running (pid \(ProcessInfo.processInfo.processIdentifier)) - F6 focus, Cmd+` cycle, Cmd+Tab switcher")
     Runtime.switcher.prewarm()
+    FocusShortcuts.check()
 }
 
 startWhenPermitted()

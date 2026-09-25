@@ -47,10 +47,13 @@ cd mac-hotkeys
 ```
 
 This builds `~/Applications/MacHotkeys.app` and a LaunchAgent that starts it at every login and
-restarts it if it ever quits. Run it again after any change to rebuild and restart. To remove
-everything: `./uninstall.sh`.
+restarts it if it ever quits, so it survives reboots with nothing more to do. macOS announces
+it as a new background item; it is listed under System Settings > General > Login Items &
+Extensions, and has to stay allowed there. Run `./install.sh` again after any change to rebuild
+and restart. To remove everything: `./uninstall.sh`.
 
-On first run, macOS asks for permissions:
+On first run, macOS asks for permissions. Grant them in System Settings > Privacy & Security;
+the agent notices within a few seconds, with no restart needed.
 
 - **Accessibility**: required for everything.
 - **Screen Recording**: for the switcher's previews only. Asked for the first time a preview is
@@ -99,7 +102,8 @@ expects three shortcuts, which you make in the Shortcuts app, each a single acti
 | `nothing on` | Set Focus: a Focus of your own (here one called "Nothing"), On | holding F6 |
 | `dnd/nothing off` | Turn Focus Off (not tied to a particular Focus) | either, when a Focus is on |
 
-To use other Focus modes, point the shortcuts at them, or rename them and change the three
+Until all three exist, F6 is left alone and works as the normal moon key; the agent notices
+them the next time F6 is pressed. To use other Focus modes, point the shortcuts at them, or rename them and change the three
 names at the top of `src/FocusToggle.swift`, where the hold time (0.35s) is too. F6 is key code
 178, the moon key on recent MacBook keyboards, set in `src/KeyRouting.swift`; `tools/sniff-key`
 prints the code of any other key. More detail is in `NOTES-focus-key.md`.
