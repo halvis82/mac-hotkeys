@@ -103,4 +103,65 @@ func focusTests() {
             }
         }
     }
+
+    suite("What a moon key press does") {
+        test("holding with Do Not Disturb on switches to the hold mode, not off") {
+            // The reported bug: DND on, hold, and it turned DND off instead.
+            expectEqual(moonKeyAction(for: .hold, in: .tapMode), .hold)
+        }
+
+        test("holding with the hold mode already on turns it off") {
+            expectEqual(moonKeyAction(for: .hold, in: .holdMode), .off)
+        }
+
+        test("holding with nothing on, or a mode set elsewhere, turns the hold mode on") {
+            expectEqual(moonKeyAction(for: .hold, in: .off), .hold)
+            expectEqual(moonKeyAction(for: .hold, in: .other), .hold)
+        }
+
+        test("tapping turns off whatever is on, and otherwise turns the tap mode on") {
+            expectEqual(moonKeyAction(for: .tap, in: .off), .tap)
+            for state: FocusState in [.tapMode, .holdMode, .other] {
+                expectEqual(moonKeyAction(for: .tap, in: state), .off, "\(state)")
+            }
+        }
+    }
+
+    suite("Which Focus is on") {
+        func json(_ text: String) -> Data { text.data(using: .utf8)! }
+        let dnd = "com.apple.donotdisturb.mode.default"
+        let custom = "8C1D-custom"
+
+        test("the file names the mode that is on") {
+            let text = #"{"data":[{"storeAssertionRecords":[{"assertionDetails":{"assertionDetailsModeIdentifier":"com.apple.donotdisturb.mode.default"}}]}]}"#
+            expectEqual(parseFocusReading(json(text)), .on(mode: dnd))
+            expectEqual(parseFocusReading(json(#"{"data":[{"storeAssertionRecords":[]}]}"#)), .off)
+            expect(parseFocusReading(json("not json")) == nil)
+        }
+
+        test("a mode is recognized by the identifier learned for it") {
+            expectEqual(classifyFocus(.on(mode: dnd), tapMode: dnd, holdMode: custom, lastKnown: .off), .tapMode)
+            expectEqual(classifyFocus(.on(mode: custom), tapMode: dnd, holdMode: custom, lastKnown: .off), .holdMode)
+            expectEqual(classifyFocus(.on(mode: "work"), tapMode: dnd, holdMode: custom, lastKnown: .holdMode), .other)
+            expectEqual(classifyFocus(.off, tapMode: dnd, holdMode: custom, lastKnown: .holdMode), .off)
+        }
+
+        test("before a mode's identifier is learned, what the agent last turned on stands in") {
+            expectEqual(classifyFocus(.on(mode: custom), tapMode: nil, holdMode: nil, lastKnown: .holdMode), .holdMode)
+            expectEqual(classifyFocus(.on(mode: dnd), tapMode: nil, holdMode: nil, lastKnown: .tapMode), .tapMode)
+            expectEqual(classifyFocus(.on(mode: dnd), tapMode: nil, holdMode: nil, lastKnown: .off), .other)
+        }
+
+        test("without the file, what the agent last did decides") {
+            expectEqual(classifyFocus(nil, tapMode: dnd, holdMode: custom, lastKnown: .tapMode), .tapMode)
+            expectEqual(classifyFocus(nil, tapMode: nil, holdMode: nil, lastKnown: .off), .off)
+        }
+
+        test("the reported case end to end: Do Not Disturb on, hold, goes to the hold mode") {
+            let state = classifyFocus(.on(mode: dnd), tapMode: dnd, holdMode: custom, lastKnown: .off)
+            expectEqual(moonKeyAction(for: .hold, in: state), .hold)
+            // and without Full Disk Access, when the agent had turned DND on itself
+            expectEqual(moonKeyAction(for: .hold, in: classifyFocus(nil, tapMode: nil, holdMode: nil, lastKnown: .tapMode)), .hold)
+        }
+    }
 }

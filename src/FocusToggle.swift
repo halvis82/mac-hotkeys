@@ -3,7 +3,8 @@ import Cocoa
 // The moon key (the Do Not Disturb key, which doubles as F6), driven through three Shortcuts,
 // named in MoonKeyShortcuts:
 //   tap   -> if any Focus is on, run the "off" shortcut. Otherwise run the "tap" one.
-//   hold  -> if any Focus is on, run the "off" shortcut. Otherwise run the "hold" one.
+//   hold  -> if the hold shortcut's Focus is on, run the "off" one. Otherwise run the "hold" one,
+//            which switches to it from whatever else is on, Do Not Disturb included.
 //
 // The key normally toggles Do Not Disturb itself before any app sees it, so it is intercepted
 // by the event tap and swallowed, and the Focus changes go through Shortcuts, the only public
@@ -57,45 +58,117 @@ private let assertionsPath =
 
 
 /// What we last set the Focus to ourselves, used when the authoritative file cannot be read.
-private var lastKnownFocusActive = false
-private var reportedUnreadableAssertions = false
-
-/// Whether any Focus is currently on, read from the file donotdisturbd maintains.
-/// Returns nil when that file cannot be read, which is a different thing from "no Focus".
-private func readFocusState() -> Bool? {
-    guard let data = try? Data(contentsOf: URL(fileURLWithPath: assertionsPath)) else { return nil }
-    return parseFocusAssertions(data)
+/// What the Focus assertions file says: off, or on in a mode, named by its identifier.
+enum FocusReading: Equatable {
+    case off
+    case on(mode: String?)
 }
 
-/// Whether the contents of Assertions.json say a Focus is on. Nil when they can't be read as
-/// the expected shape, which must never be mistaken for "off".
-func parseFocusAssertions(_ data: Data) -> Bool? {
+/// The Focus as the moon key sees it: off, one of the two modes its shortcuts turn on, or some
+/// other mode set from elsewhere.
+enum FocusState: Equatable {
+    case off
+    case tapMode
+    case holdMode
+    case other
+}
+
+enum MoonKeyGesture { case tap, hold }
+enum MoonKeyAction: Equatable { case tap, hold, off }
+
+/// Which shortcut a press runs.
+///
+/// A tap turns off whatever is on, or else turns on its mode. A hold switches to its mode from
+/// anything else, Do Not Disturb included, and turns it off only when its mode is already the
+/// one on. Holding used to turn off any Focus, so going from Do Not Disturb to the hold mode
+/// took two presses.
+func moonKeyAction(for gesture: MoonKeyGesture, in state: FocusState) -> MoonKeyAction {
+    switch gesture {
+    case .tap: return state == .off ? .tap : .off
+    case .hold: return state == .holdMode ? .off : .hold
+    }
+}
+
+/// What the assertions file says, or nil when it can't be read as the expected shape, which
+/// must never be mistaken for "off".
+func parseFocusReading(_ data: Data) -> FocusReading? {
     guard let object = try? JSONSerialization.jsonObject(with: data),
           let json = object as? [String: Any],
           let entries = json["data"] as? [[String: Any]],
           let first = entries.first,
           let records = first["storeAssertionRecords"] as? [[String: Any]]
     else { return nil }
-    return !records.isEmpty
+    guard let record = records.first else { return .off }
+    let details = record["assertionDetails"] as? [String: Any]
+    return .on(mode: details?["assertionDetailsModeIdentifier"] as? String)
 }
 
-/// True if any Focus mode is currently active.
+/// Whether the contents of Assertions.json say a Focus is on. Nil when they can't be read.
+func parseFocusAssertions(_ data: Data) -> Bool? {
+    parseFocusReading(data).map { $0 != .off }
+}
+
+/// Names the Focus that is on, from the file when it could be read, and otherwise from what the
+/// agent last did itself.
 ///
-/// The file is authoritative but sits behind Full Disk Access. Without that grant the read
-/// fails, and treating the failure as "nothing is active" is what made the moon key turn Do Not
-/// Disturb *on* every time instead of toggling it off. So when the file is unreadable we fall
-/// back to what we last set ourselves, which toggles correctly as long as Focus isn't also being
-/// changed from Control Center. Granting Full Disk Access makes it exact again.
-private func isAnyFocusActive() -> Bool {
-    if let state = readFocusState() {
-        lastKnownFocusActive = state
-        return state
-    }
-    if !reportedUnreadableAssertions {
+/// The file only gives a mode identifier, and which identifier each shortcut turns on is learned
+/// by reading the file after running it. Until that has happened, a mode that is on is taken to
+/// be the one the agent last turned on itself, if it did.
+func classifyFocus(_ reading: FocusReading?,
+                   tapMode: String?,
+                   holdMode: String?,
+                   lastKnown: FocusState) -> FocusState {
+    guard let reading = reading else { return lastKnown }
+    guard case .on(let mode) = reading else { return .off }
+    if let mode = mode, mode == holdMode { return .holdMode }
+    if let mode = mode, mode == tapMode { return .tapMode }
+    if lastKnown == .holdMode, holdMode == nil { return .holdMode }
+    if lastKnown == .tapMode, tapMode == nil { return .tapMode }
+    return .other
+}
+
+/// What the agent last did itself, for when the file can't be read. Main thread only.
+private var lastKnownFocus: FocusState = .off
+private var reportedUnreadableAssertions = false
+
+private let tapModeKey = "moonKey.tapFocusMode"
+private let holdModeKey = "moonKey.holdFocusMode"
+
+/// The Focus assertions file needs Full Disk Access. A failed read is not the same as "off":
+/// treating it as off is what once made the key turn Do Not Disturb on every single time.
+private func readFocus() -> FocusReading? {
+    guard let data = try? Data(contentsOf: URL(fileURLWithPath: assertionsPath)) else { return nil }
+    return parseFocusReading(data)
+}
+
+private func currentFocus() -> FocusState {
+    let reading = readFocus()
+    if reading == nil, !reportedUnreadableAssertions {
         reportedUnreadableAssertions = true
         log("cannot read Focus state (needs Full Disk Access); tracking it locally instead")
     }
-    return lastKnownFocusActive
+    let state = classifyFocus(reading,
+                              tapMode: UserDefaults.standard.string(forKey: tapModeKey),
+                              holdMode: UserDefaults.standard.string(forKey: holdModeKey),
+                              lastKnown: lastKnownFocus)
+    lastKnownFocus = state
+    return state
+}
+
+/// After a shortcut turned a mode on, reads which one it was, so it can be recognized later.
+/// The assertion is written a moment after the shortcut returns, so this waits for it.
+private func learnMode(for gesture: MoonKeyGesture) {
+    for _ in 0..<20 {
+        switch readFocus() {
+        case nil:
+            return // no Full Disk Access: nothing to learn, and no reason to hold up the next press
+        case .on(let mode?)?:
+            UserDefaults.standard.set(mode, forKey: gesture == .hold ? holdModeKey : tapModeKey)
+            return
+        default:
+            usleep(100_000)
+        }
+    }
 }
 
 /// Whether the three shortcuts exist, so the key can be left to macOS until they do.
@@ -173,7 +246,7 @@ private let actionQueue = DispatchQueue(label: "focustoggle.action")
 /// shortcut never firing. Because these run on one serial queue, a single hang used to block
 /// every later press of the key, so the moon key simply stopped responding until the agent was
 /// restarted. Anything still running after a few seconds is killed so the queue keeps moving.
-private func runShortcut(_ name: String, marking active: Bool) {
+private func runShortcut(_ name: String, for action: MoonKeyAction) {
     let task = Process()
     task.executableURL = URL(fileURLWithPath: "/usr/bin/shortcuts")
     task.arguments = ["run", name]
@@ -197,26 +270,34 @@ private func runShortcut(_ name: String, marking active: Bool) {
     watchdog.cancel()
 
     if task.terminationStatus == 0 {
-        lastKnownFocusActive = active
+        let state: FocusState = action == .off ? .off : action == .hold ? .holdMode : .tapMode
+        DispatchQueue.main.async { lastKnownFocus = state }
+        switch action {
+        case .tap: learnMode(for: .tap)
+        case .hold: learnMode(for: .hold)
+        case .off: break
+        }
         log("ran shortcut \"\(name)\"")
     } else {
         log("shortcut \"\(name)\" exited \(task.terminationStatus)")
     }
 }
 
-private func onTap() {
-    let active = isAnyFocusActive()
+private func press(_ gesture: MoonKeyGesture) {
+    let action = moonKeyAction(for: gesture, in: currentFocus())
     let shortcuts = FocusShortcuts.current
-    let name = active ? shortcuts.off : shortcuts.tap
-    actionQueue.async { runShortcut(name, marking: !active) }
+    let name: String
+    switch action {
+    case .tap: name = shortcuts.tap
+    case .hold: name = shortcuts.hold
+    case .off: name = shortcuts.off
+    }
+    actionQueue.async { runShortcut(name, for: action) }
 }
 
-private func onHold() {
-    let active = isAnyFocusActive()
-    let shortcuts = FocusShortcuts.current
-    let name = active ? shortcuts.off : shortcuts.hold
-    actionQueue.async { runShortcut(name, marking: !active) }
-}
+private func onTap() { press(.tap) }
+
+private func onHold() { press(.hold) }
 
 // MARK: - Key handling
 

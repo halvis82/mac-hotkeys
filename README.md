@@ -36,7 +36,8 @@ Then grant it, in System Settings > Privacy & Security:
 
 - **Accessibility**: required.
 - **Screen Recording**: for the switcher's previews.
-- **Full Disk Access**: optional, lets the moon key see Focus changes made elsewhere.
+- **Full Disk Access**: optional, lets the moon key see which Focus is on even when it was
+  changed elsewhere, such as from Control Center.
 
 ### Keeping permissions across rebuilds
 
@@ -63,8 +64,8 @@ each with a single **Set Focus** action:
 | Shortcut | What it should do | Runs when |
 |---|---|---|
 | **Moon Key Tap** | turn a Focus mode on, e.g. Do Not Disturb | tapped, with no Focus on |
-| **Moon Key Hold** | turn another Focus mode on | held, with no Focus on |
-| **Moon Key Off** | turn Focus off, not tied to one mode, so it clears whichever is on | tapped or held, with a Focus on |
+| **Moon Key Hold** | turn another Focus mode on | held, unless that mode is already on |
+| **Moon Key Off** | turn Focus off, not tied to one mode, so it clears whichever is on | tapped with any Focus on, or held with the hold mode on |
 
 To use shortcuts you already have, put their names in `~/.config/mac-hotkeys/moon-key.json`:
 
