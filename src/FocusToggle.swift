@@ -1,19 +1,18 @@
 import Cocoa
 
-// Replaces the F6 "moon" key's built-in behavior with:
-//   tap   -> if any Focus is active, turn it off. Otherwise turn on Do Not Disturb.
-//   hold  -> if any Focus is active, turn it off. Otherwise turn on the "Nothing" Focus.
+// The moon key (the Do Not Disturb key, which doubles as F6), driven through three Shortcuts:
+//   tap   -> if any Focus is on, run "Moon Key Off". Otherwise run "Moon Key Tap".
+//   hold  -> if any Focus is on, run "Moon Key Off". Otherwise run "Moon Key Hold".
 //
-// The key normally toggles Do Not Disturb itself before any app ever sees it, so we
-// intercept it with a CGEventTap at the HID level and swallow it (return nil), then
-// drive the actual Focus state changes through Shortcuts (the only public, stable
-// surface Apple exposes for this - see README for the three shortcuts this expects).
+// The key normally toggles Do Not Disturb itself before any app sees it, so it is intercepted
+// by the event tap and swallowed, and the Focus changes go through Shortcuts, the only public
+// way to set a Focus. Which Focus each shortcut sets is up to whoever makes them.
 
 private let holdThreshold: TimeInterval = 0.35
 
-private let shortcutFocusOn = "dnd on"
-private let shortcutNothingOn = "nothing on"
-private let shortcutFocusOff = "dnd/nothing off"
+private let shortcutTap = "Moon Key Tap"
+private let shortcutHold = "Moon Key Hold"
+private let shortcutOff = "Moon Key Off"
 
 private let assertionsPath =
     NSHomeDirectory() + "/Library/DoNotDisturb/DB/Assertions.json"
@@ -97,7 +96,7 @@ enum FocusShortcuts {
                 task.waitUntilExit()
                 names = Set((String(data: data, encoding: .utf8) ?? "").split(separator: "\n").map(String.init))
             }
-            let required = [shortcutFocusOn, shortcutNothingOn, shortcutFocusOff]
+            let required = [shortcutTap, shortcutHold, shortcutOff]
             let missing = required.filter { !names.contains($0) }
             lock.lock()
             installed = missing.isEmpty
@@ -106,7 +105,7 @@ enum FocusShortcuts {
             if report { reportedMissing = true }
             lock.unlock()
             if report {
-                log("F6 left to macOS: Shortcuts \(missing.map { "\"\($0)\"" }.joined(separator: ", ")) not found (see README)")
+                log("moon key left to macOS: Shortcuts \(missing.map { "\"\($0)\"" }.joined(separator: ", ")) not found (see README)")
             }
         }
     }
@@ -153,13 +152,13 @@ private func runShortcut(_ name: String, marking active: Bool) {
 
 private func onTap() {
     let active = isAnyFocusActive()
-    let name = active ? shortcutFocusOff : shortcutFocusOn
+    let name = active ? shortcutOff : shortcutTap
     actionQueue.async { runShortcut(name, marking: !active) }
 }
 
 private func onHold() {
     let active = isAnyFocusActive()
-    let name = active ? shortcutFocusOff : shortcutNothingOn
+    let name = active ? shortcutOff : shortcutHold
     actionQueue.async { runShortcut(name, marking: !active) }
 }
 

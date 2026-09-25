@@ -54,7 +54,7 @@ enum Runtime {
     static var dryRun = false
     static var tap: CFMachPort?
     static var tapThread: Thread?
-    /// Whether the F6 press under way belongs to the agent. Only touched on the tap's thread.
+    /// Whether the moon key press under way belongs to the agent. Only touched on the tap's thread.
     static var focusKeyClaimed = true
 }
 Runtime.sky = sky
@@ -121,7 +121,7 @@ func makeEventTap() -> CFMachPort? {
                 SwitcherGate.lower()
                 DispatchQueue.main.async { switcher.cancel() }
             }
-            // Whether F6 is ours is decided when it goes down and kept for when it comes up, so
+            // Whether the moon key is ours is decided when it goes down and kept for when it comes up, so
             // macOS never sees half a keypress.
             let code = event.getIntegerValueField(.keyboardEventKeycode)
             if code == dndKeyCode, type == .keyDown, !event.isAutorepeat {
@@ -216,7 +216,7 @@ func startWhenPermitted() {
     tapThread.qualityOfService = .userInteractive
     tapThread.start()
     Runtime.tapThread = tapThread
-    log("running (pid \(ProcessInfo.processInfo.processIdentifier)) - F6 focus, Cmd+` cycle, Cmd+Tab switcher")
+    log("running (pid \(ProcessInfo.processInfo.processIdentifier)) - moon key focus, Cmd+` cycle, Cmd+Tab switcher")
     Runtime.switcher.prewarm()
     FocusShortcuts.check()
 }

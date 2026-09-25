@@ -1,7 +1,7 @@
 import CoreGraphics
 import Foundation
 
-let dndKeyCode: Int64 = 178   // F6, the moon key, when Fn is not held
+let dndKeyCode: Int64 = 178   // the moon key, which is F6 when Fn is held
 let graveKeyCode: Int64 = 50  // `
 let tabKeyCode: Int64 = 48
 let escKeyCode: Int64 = 53
@@ -42,7 +42,7 @@ enum KeyAction: Equatable {
 
 func routeKey(type: CGEventType, code: Int64, flags: CGEventFlags, switcherOpen: Bool,
               focusKeyEnabled: Bool = true) -> KeyAction {
-    // --- Focus toggle: the F6 moon key, tap versus hold ---
+    // --- Focus toggle: the moon key, tap versus hold ---
     // Left to macOS when the shortcuts it runs are not set up, see FocusShortcuts.
     if code == dndKeyCode, type == .keyDown || type == .keyUp {
         guard focusKeyEnabled else { return .pass }
