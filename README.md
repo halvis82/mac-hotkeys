@@ -1,53 +1,121 @@
 # mac-hotkeys
 
-One small background agent that replaces things Hammerspoon would otherwise be used for, without
-running Hammerspoon. A tiny LSUIElement app started by a LaunchAgent, with a single event tap
-driving all three hotkeys. No dock icon, no menu bar item, no UI at all.
+A small background agent for macOS that adds three hotkeys. It is one tiny app with no Dock
+icon, menu bar item or settings, started at login by a LaunchAgent, with a single keyboard event
+tap behind all three.
 
-| Hotkey | What it does |
+| Hotkey | What it does | Who it is for |
+|---|---|---|
+| **Cmd+Tab** | A window switcher: switches between **windows** rather than apps, with live previews, and goes straight to the window you pick, even on another fullscreen Space. Replaces the built-in Cmd+Tab. | Anyone |
+| **Cmd+\`** | Cycles the front app's windows, including ones in their own fullscreen Space, which the built-in version skips. | Anyone |
+| **F6** (the moon key) | Tap toggles Do Not Disturb, hold turns on a Focus called "Nothing", and either turns an active Focus off. | Set up for one person's Focus modes; see [Customizing the F6 key](#customizing-the-f6-key) |
+
+## The switcher
+
+Hold **Cmd** and press **Tab**. The switcher lists every place you can go, left to right in the
+order of your Spaces:
+
+- each fullscreen window (both halves of a split view) is its own tile, with a preview
+- each desktop Space is one tile, showing its wallpaper and windows, with one icon per app
+
+While holding Cmd:
+
+| Key | Does |
 |---|---|
-| **F6** (moon key) | Tap toggles Do Not Disturb, hold turns on the "Nothing" Focus, and if any Focus is on, either gesture turns it off. |
-| **Cmd+`** | Cycles between windows of the front app, including ones fullscreened into their own Space (which macOS's built-in version skips). |
-| **Cmd+Tab** | A switcher listing **windows** instead of apps, with previews, ordered by where things actually are. Tab/Shift+Tab to move, **1-9** to jump straight to a tile, arrows to pick an app inside a desktop tile, Esc to cancel, release Cmd to go. |
+| **Tab** / **Shift+Tab** | move right / left |
+| **1** to **9** | jump to that tile |
+| **Left** / **Right** | pick an app within a desktop tile |
+| **Esc** | cancel |
+| mouse | hover to pick, click to go |
+
+Let go of Cmd to switch. A quick Cmd+Tab flips back to the window you were in before, as the
+built-in one does. Minimized windows appear on the first desktop tile, dimmed.
+
+## Requirements
+
+- macOS 14 or later. Developed on macOS 26, Apple Silicon.
+- The Xcode Command Line Tools, for `swiftc`: `xcode-select --install`. Nothing else: no
+  packages or third-party dependencies, only system frameworks.
+- For the F6 key only: the Shortcuts app, and three shortcuts (below).
+
+## Install
 
 ```sh
+git clone https://github.com/halvis82/mac-hotkeys.git
+cd mac-hotkeys
 ./install.sh
 ```
 
-## Permissions
+This builds `~/Applications/MacHotkeys.app` and a LaunchAgent that starts it at every login and
+restarts it if it ever quits. Run it again after any change to rebuild and restart. To remove
+everything: `./uninstall.sh`.
 
-One app, so permissions are granted once:
+On first run, macOS asks for permissions:
 
-- **Accessibility** — required for everything
-- **Screen Recording** — switcher previews only, and asked for only the first time a preview is
-  actually drawn, so using the moon key alone never raises a screen prompt. Fails quietly: without it tiles render blank
-  while everything else keeps working, and `CGPreflightScreenCaptureAccess()` can even report
-  `true` while captures are being refused, so trust the tiles rather than the API.
-- **Full Disk Access** — optional, and only for the moon key. The file saying which Focus is
-  active is TCC-protected; without the grant the key tracks the state itself, which toggles
-  correctly unless Focus is also changed from Control Center. Granting it makes that exact.
+- **Accessibility**: required for everything.
+- **Screen Recording**: for the switcher's previews only. Asked for the first time a preview is
+  drawn. Without it the tiles are blank and everything else works.
+- **Full Disk Access**: optional, for the F6 key only. It lets the agent read which Focus is on;
+  without it, the key keeps track itself, which is right unless Focus is changed elsewhere.
 
-Input Monitoring is *not* needed in practice; Accessibility covers the event tap.
-
-### Signing, and why it matters
-
-Ad-hoc signatures change on every build, so macOS treats each rebuild as a different app: the
-Privacy & Security entry silently goes stale, showing as enabled while granting nothing. To keep
-grants across rebuilds, `install.sh` signs with a fixed identity if one exists. Create it once:
+What it is doing, including how long every Cmd+Tab took:
 
 ```sh
-openssl req -x509 -newkey rsa:2048 -keyout /tmp/sk.pem -out ~/halvor-codesign.cer -days 3650 -nodes \
-  -subj "/CN=Halvor Local Codesign" \
+tail -f ~/Library/Logs/com.halvor.machotkeys.log
+```
+
+### Signing, so permissions survive rebuilds
+
+macOS ties permissions to the app's signature. Without a signing identity `install.sh` signs
+ad hoc, and every rebuild then looks like a new app: the old Privacy & Security entry still
+shows as enabled but grants nothing, and you have to remove it and grant again. To avoid that,
+create a self-signed code-signing certificate once. No sudo, no Apple developer account:
+
+```sh
+openssl req -x509 -newkey rsa:2048 -keyout /tmp/sk.pem -out /tmp/codesign.cer -days 3650 -nodes \
+  -subj "/CN=Local Codesign" \
   -addext "basicConstraints=critical,CA:false" \
   -addext "keyUsage=critical,digitalSignature" \
   -addext "extendedKeyUsage=critical,codeSigning"
-openssl pkcs12 -export -out /tmp/id.p12 -inkey /tmp/sk.pem -in ~/halvor-codesign.cer \
-  -passout pass:tmp -legacy -macalg sha1 -name "Halvor Local Codesign"
+openssl pkcs12 -export -out /tmp/id.p12 -inkey /tmp/sk.pem -in /tmp/codesign.cer \
+  -passout pass:tmp -legacy -macalg sha1 -name "Local Codesign"
 security import /tmp/id.p12 -k ~/Library/Keychains/login.keychain-db -P tmp -T /usr/bin/codesign -A
-security add-trusted-cert -r trustRoot -p codeSign -k ~/Library/Keychains/login.keychain-db ~/halvor-codesign.cer
+security add-trusted-cert -r trustRoot -p codeSign -k ~/Library/Keychains/login.keychain-db /tmp/codesign.cer
+rm /tmp/sk.pem /tmp/id.p12 /tmp/codesign.cer
 ```
 
-No sudo needed: trusting it in the user domain is enough.
+`install.sh` uses any identity whose name contains "Local Codesign", or the one named in
+`SIGN_ID`.
+
+## Customizing the F6 key
+
+The moon key drives Focus through Shortcuts, since that is the only way an app is allowed to
+set a Focus (see [Why these use private APIs](#why-these-use-private-apis)). Out of the box it
+expects three shortcuts, which you make in the Shortcuts app, each a single action:
+
+| Shortcut name | Action | Run by |
+|---|---|---|
+| `dnd on` | Set Focus: Do Not Disturb, On | tapping F6 |
+| `nothing on` | Set Focus: a Focus of your own (here one called "Nothing"), On | holding F6 |
+| `dnd/nothing off` | Turn Focus Off (not tied to a particular Focus) | either, when a Focus is on |
+
+To use other Focus modes, point the shortcuts at them, or rename them and change the three
+names at the top of `src/FocusToggle.swift`, where the hold time (0.35s) is too. F6 is key code
+178, the moon key on recent MacBook keyboards, set in `src/KeyRouting.swift`; `tools/sniff-key`
+prints the code of any other key. More detail is in `NOTES-focus-key.md`.
+
+## Other changes
+
+- **Dropping a hotkey**: remove its case from `routeKey` in `src/KeyRouting.swift`. Keys the
+  agent does not claim pass through to macOS untouched.
+- **The identifier**: the app and LaunchAgent are `com.halvor.machotkeys`, set in `install.sh`
+  and `uninstall.sh`. Change both to your own if you like; permissions are granted per
+  identifier, so it means granting them again.
+
+# How it works
+
+The rest of this is the design notes: what each part does and why, most of it learned the hard
+way. Useful if you change anything.
 
 ## Tests
 
@@ -202,7 +270,8 @@ so only the immediate reading means anything.
 
 ## tools/
 
-Small diagnostics used to build the above, kept because they're useful for extending it:
+Small diagnostics used to build the above, kept because they're useful for extending it. Build
+one with `swiftc -o tools/sniff-key tools/sniff-key.swift`.
 
 - `sniff-key` — prints the raw keyboard/system events a key generates. This is how the moon key
   was identified as plain keycode **178** rather than one of the hidden "system defined" media

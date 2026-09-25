@@ -8,16 +8,6 @@ LABEL="com.halvor.machotkeys"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 LOG_DIR="$HOME/Library/Logs"
 
-# Retire the three separate agents this replaced, so their permission entries and duplicate
-# event taps don't linger. Two switchers fighting over Cmd+Tab is a genuinely confusing bug.
-for OLD in focustoggle fullscreencycle cmdtabswitcher; do
-    launchctl bootout "gui/$UID/com.halvor.$OLD" 2>/dev/null || true
-    rm -f "$HOME/Library/LaunchAgents/com.halvor.$OLD.plist"
-done
-rm -rf "$HOME/Applications/FocusToggle.app" \
-       "$HOME/Applications/FullscreenCycle.app" \
-       "$HOME/Applications/CmdTabSwitcher.app"
-
 echo "==> Building"
 mkdir -p "$APP_DIR/Contents/MacOS"
 swiftc -O -o "$APP_DIR/Contents/MacOS/$APP_NAME" "$HERE"/src/*.swift \
@@ -35,7 +25,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLISTEOF
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleVersion</key><string>1.0</string>
     <key>CFBundleShortVersionString</key><string>1.0</string>
-    <key>LSMinimumSystemVersion</key><string>12.0</string>
+    <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>LSUIElement</key><true/>
 </dict>
 </plist>
@@ -44,8 +34,9 @@ PLISTEOF
 # Prefer a stable signing identity. Ad-hoc signatures change on every build, so macOS treats
 # each rebuild as a different app: the Privacy & Security entry silently goes stale, showing as
 # enabled while granting nothing. A fixed identity keeps grants valid across rebuilds.
-# See README.md for the one-time setup.
-SIGN_ID="Halvor Local Codesign"
+# See README.md for the one-time setup. Matched as a substring of the certificate's name, so
+# "Local Codesign" also finds one called, say, "Jane's Local Codesign". Override with SIGN_ID.
+SIGN_ID="${SIGN_ID:-Local Codesign}"
 if security find-identity -v -p codesigning 2>/dev/null | grep -q "$SIGN_ID"; then
     echo "==> Signing with stable identity ($SIGN_ID)"
     codesign --force --deep --sign "$SIGN_ID" "$APP_DIR" >/dev/null 2>&1 || true
