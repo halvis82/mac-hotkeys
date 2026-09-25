@@ -3,6 +3,8 @@
 A small background agent for macOS with three hotkeys. No Dock icon, no menu bar item, no
 settings.
 
+Built for my own use and shared as is. It works on my machine; it may need changes on yours.
+
 - **Cmd+Tab**: a window switcher. Shows every window with a preview, including ones in
   fullscreen Spaces, and goes straight to the one you pick. Replaces the built-in Cmd+Tab.
 - **Cmd+\`**: cycles the front app's windows, including fullscreen ones, which the built-in
@@ -63,6 +65,12 @@ each with a single **Set Focus** action:
 | **Moon Key Tap** | turn a Focus mode on, e.g. Do Not Disturb | tapped, with no Focus on |
 | **Moon Key Hold** | turn another Focus mode on | held, with no Focus on |
 | **Moon Key Off** | turn Focus off, not tied to one mode, so it clears whichever is on | tapped or held, with a Focus on |
+
+To use shortcuts you already have, put their names in `~/.config/mac-hotkeys/moon-key.json`:
+
+```json
+{ "tap": "My DND on", "hold": "My Work on", "off": "My Focus off" }
+```
 
 It works this way because macOS only lets apps change Focus through Shortcuts. Until all three
 exist, the moon key works as normal.

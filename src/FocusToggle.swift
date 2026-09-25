@@ -1,8 +1,9 @@
 import Cocoa
 
-// The moon key (the Do Not Disturb key, which doubles as F6), driven through three Shortcuts:
-//   tap   -> if any Focus is on, run "Moon Key Off". Otherwise run "Moon Key Tap".
-//   hold  -> if any Focus is on, run "Moon Key Off". Otherwise run "Moon Key Hold".
+// The moon key (the Do Not Disturb key, which doubles as F6), driven through three Shortcuts,
+// named in MoonKeyShortcuts:
+//   tap   -> if any Focus is on, run the "off" shortcut. Otherwise run the "tap" one.
+//   hold  -> if any Focus is on, run the "off" shortcut. Otherwise run the "hold" one.
 //
 // The key normally toggles Do Not Disturb itself before any app sees it, so it is intercepted
 // by the event tap and swallowed, and the Focus changes go through Shortcuts, the only public
@@ -10,9 +11,46 @@ import Cocoa
 
 private let holdThreshold: TimeInterval = 0.35
 
-private let shortcutTap = "Moon Key Tap"
-private let shortcutHold = "Moon Key Hold"
-private let shortcutOff = "Moon Key Off"
+/// Which shortcuts the moon key runs, by name.
+///
+/// Set in ~/.config/mac-hotkeys/moon-key.json, for example
+///     {"tap": "dnd on", "hold": "nothing on", "off": "dnd/nothing off"}
+/// Any name left out, or the whole file, falls back to the defaults below. Read again, along with
+/// which shortcuts exist, in the background on every press, so an edit applies from the press
+/// after it has been noticed, with no restart.
+struct MoonKeyShortcuts: Equatable {
+    var tap = "Moon Key Tap"
+    var hold = "Moon Key Hold"
+    var off = "Moon Key Off"
+
+    static let configPath = NSHomeDirectory() + "/.config/mac-hotkeys/moon-key.json"
+
+    /// The names from a config file's contents, or nil if it is not a JSON object.
+    static func parse(_ data: Data) -> MoonKeyShortcuts? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        var names = MoonKeyShortcuts()
+        func name(_ key: String) -> String? {
+            guard let value = object[key] as? String else { return nil }
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        names.tap = name("tap") ?? names.tap
+        names.hold = name("hold") ?? names.hold
+        names.off = name("off") ?? names.off
+        return names
+    }
+
+    /// The configured names, or the defaults when there is no config file. A file that cannot
+    /// be read as JSON also gives the defaults, and is logged.
+    static func load() -> MoonKeyShortcuts {
+        guard let data = FileManager.default.contents(atPath: configPath) else { return MoonKeyShortcuts() }
+        guard let names = parse(data) else {
+            log("\(configPath) is not valid JSON, using the default shortcut names")
+            return MoonKeyShortcuts()
+        }
+        return names
+    }
+}
 
 private let assertionsPath =
     NSHomeDirectory() + "/Library/DoNotDisturb/DB/Assertions.json"
@@ -69,6 +107,15 @@ private func isAnyFocusActive() -> Bool {
 enum FocusShortcuts {
     private static let lock = NSLock()
     private static var installed = false
+    private static var names = MoonKeyShortcuts()
+    private static var reportedNames: MoonKeyShortcuts?
+
+    /// The names in use, as of the last check.
+    static var current: MoonKeyShortcuts {
+        lock.lock()
+        defer { lock.unlock() }
+        return names
+    }
     private static var checking = false
     private static var reportedMissing = false
 
@@ -90,20 +137,27 @@ enum FocusShortcuts {
             let output = Pipe()
             task.standardOutput = output
             task.standardError = FileHandle.nullDevice
-            var names: Set<String> = []
+            var existing: Set<String> = []
             if (try? task.run()) != nil {
                 let data = output.fileHandleForReading.readDataToEndOfFile()
                 task.waitUntilExit()
-                names = Set((String(data: data, encoding: .utf8) ?? "").split(separator: "\n").map(String.init))
+                existing = Set((String(data: data, encoding: .utf8) ?? "").split(separator: "\n").map(String.init))
             }
-            let required = [shortcutTap, shortcutHold, shortcutOff]
-            let missing = required.filter { !names.contains($0) }
+            let configured = MoonKeyShortcuts.load()
+            let required = [configured.tap, configured.hold, configured.off]
+            let missing = required.filter { !existing.contains($0) }
             lock.lock()
             installed = missing.isEmpty
+            names = configured
+            let announce = missing.isEmpty && reportedNames != configured
+            if announce { reportedNames = configured }
             checking = false
             let report = !missing.isEmpty && !reportedMissing
             if report { reportedMissing = true }
             lock.unlock()
+            if announce {
+                log("moon key runs \"\(configured.tap)\" on tap, \"\(configured.hold)\" on hold, \"\(configured.off)\" to turn off")
+            }
             if report {
                 log("moon key left to macOS: Shortcuts \(missing.map { "\"\($0)\"" }.joined(separator: ", ")) not found (see README)")
             }
@@ -152,13 +206,15 @@ private func runShortcut(_ name: String, marking active: Bool) {
 
 private func onTap() {
     let active = isAnyFocusActive()
-    let name = active ? shortcutOff : shortcutTap
+    let shortcuts = FocusShortcuts.current
+    let name = active ? shortcuts.off : shortcuts.tap
     actionQueue.async { runShortcut(name, marking: !active) }
 }
 
 private func onHold() {
     let active = isAnyFocusActive()
-    let name = active ? shortcutOff : shortcutHold
+    let shortcuts = FocusShortcuts.current
+    let name = active ? shortcuts.off : shortcuts.hold
     actionQueue.async { runShortcut(name, marking: !active) }
 }
 

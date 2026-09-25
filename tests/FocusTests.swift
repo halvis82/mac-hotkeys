@@ -79,4 +79,28 @@ func focusTests() {
             expectEqual(counts.taps, 1); expectEqual(counts.holds, 1)
         }
     }
+
+    suite("Moon key shortcut names") {
+        func json(_ text: String) -> Data { text.data(using: .utf8)! }
+
+        test("names come from the config file") {
+            let names = MoonKeyShortcuts.parse(json(#"{"tap": "dnd on", "hold": "nothing on", "off": "dnd/nothing off"}"#))
+            expectEqual(names, MoonKeyShortcuts(tap: "dnd on", hold: "nothing on", off: "dnd/nothing off"))
+        }
+
+        test("any name left out, blank or not a string keeps its default") {
+            let names = MoonKeyShortcuts.parse(json(#"{"tap": "Work on", "hold": "  ", "off": 3}"#))
+            expectEqual(names, MoonKeyShortcuts(tap: "Work on"))
+        }
+
+        test("names are trimmed") {
+            expectEqual(MoonKeyShortcuts.parse(json(#"{"off": "  Focus off \n"}"#))?.off, "Focus off")
+        }
+
+        test("a file that is not a JSON object is rejected, so the defaults are used") {
+            for text in ["", "not json", "[1, 2]", "\"tap\""] {
+                expect(MoonKeyShortcuts.parse(json(text)) == nil, "\(text) was accepted")
+            }
+        }
+    }
 }

@@ -126,7 +126,7 @@ func makeEventTap() -> CFMachPort? {
             let code = event.getIntegerValueField(.keyboardEventKeycode)
             if code == dndKeyCode, type == .keyDown, !event.isAutorepeat {
                 Runtime.focusKeyClaimed = FocusShortcuts.areInstalled
-                if !Runtime.focusKeyClaimed { FocusShortcuts.check() }
+                FocusShortcuts.check() // in the background, for the next press
             }
             let action = routeKey(type: type,
                                   code: code,
