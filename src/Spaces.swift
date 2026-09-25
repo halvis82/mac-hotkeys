@@ -85,6 +85,38 @@ final class SkyLight {
         return out
     }
 
+    private typealias CopyWindowsWithOptionsAndTagsFn = @convention(c)
+        (Int32, UInt32, CFArray, UInt32, UnsafeMutablePointer<UInt64>, UnsafeMutablePointer<UInt64>) -> Unmanaged<CFArray>?
+
+    /// Optional, unlike the symbols above: without it `spaces(ofWindowsOn:)` returns nil and
+    /// callers ask window by window instead.
+    private lazy var copyWindowsWithOptionsAndTags: CopyWindowsWithOptionsAndTagsFn? = {
+        guard let handle = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_NOW),
+              let symbol = dlsym(handle, "SLSCopyWindowsWithOptionsAndTags")
+        else { return nil }
+        return unsafeBitCast(symbol, to: CopyWindowsWithOptionsAndTagsFn.self)
+    }()
+
+    /// Every window on each of these Spaces, as the Spaces each window is on.
+    ///
+    /// One round trip per Space instead of one per window: about 0.25ms for the whole system
+    /// against about 4ms asking `space(ofWindow:)` for each of 65 windows, and the answers
+    /// agreed for all 65. Options 0x7 matter: 0x2, which yabai uses for visible windows, left
+    /// out 5 of the 65, windows the per-window query places on a Space.
+    func spaces(ofWindowsOn spaceIDs: [UInt64]) -> [CGWindowID: [UInt64]]? {
+        guard let copyWindows = copyWindowsWithOptionsAndTags else { return nil }
+        var result: [CGWindowID: [UInt64]] = [:]
+        for spaceID in spaceIDs {
+            var setTags: UInt64 = 0
+            var clearTags: UInt64 = 0
+            guard let list = copyWindows(connectionID, 0, [spaceID] as CFArray, 0x7, &setTags, &clearTags)?
+                .takeRetainedValue() as? [NSNumber]
+            else { return nil }
+            for window in list { result[CGWindowID(window.uint32Value), default: []].append(spaceID) }
+        }
+        return result
+    }
+
     func space(ofWindow id: CGWindowID) -> UInt64? {
         guard let result = copySpacesForWindows(connectionID, 0x7, [id] as CFArray) else { return nil }
         return (result.takeRetainedValue() as? [NSNumber])?.first?.uint64Value

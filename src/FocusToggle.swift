@@ -26,17 +26,20 @@ private var reportedUnreadableAssertions = false
 /// Whether any Focus is currently on, read from the file donotdisturbd maintains.
 /// Returns nil when that file cannot be read, which is a different thing from "no Focus".
 private func readFocusState() -> Bool? {
-    do {
-        let data = try Data(contentsOf: URL(fileURLWithPath: assertionsPath))
-        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let entries = json["data"] as? [[String: Any]],
-              let first = entries.first,
-              let records = first["storeAssertionRecords"] as? [[String: Any]]
-        else { return nil }
-        return !records.isEmpty
-    } catch {
-        return nil
-    }
+    guard let data = try? Data(contentsOf: URL(fileURLWithPath: assertionsPath)) else { return nil }
+    return parseFocusAssertions(data)
+}
+
+/// Whether the contents of Assertions.json say a Focus is on. Nil when they can't be read as
+/// the expected shape, which must never be mistaken for "off".
+func parseFocusAssertions(_ data: Data) -> Bool? {
+    guard let object = try? JSONSerialization.jsonObject(with: data),
+          let json = object as? [String: Any],
+          let entries = json["data"] as? [[String: Any]],
+          let first = entries.first,
+          let records = first["storeAssertionRecords"] as? [[String: Any]]
+    else { return nil }
+    return !records.isEmpty
 }
 
 /// True if any Focus mode is currently active.
@@ -111,29 +114,49 @@ private func onHold() {
 
 // MARK: - Key handling
 
-private var keyIsDown = false
-private var holdFired = false
-private var holdWorkItem: DispatchWorkItem?
+/// Tells a tap from a hold: a hold fires as soon as the threshold passes with the key still down,
+/// a tap fires on release if the hold never did. Key repeat is ignored.
+final class TapHoldDetector {
+    private let threshold: TimeInterval
+    private let onTap: () -> Void
+    private let onHold: () -> Void
 
-func handleKeyDown() {
-    if keyIsDown { return } // ignore any stray repeat
-    keyIsDown = true
-    holdFired = false
-    let item = DispatchWorkItem {
-        holdFired = true
-        onHold()
+    private var keyIsDown = false
+    private var holdFired = false
+    private var holdWorkItem: DispatchWorkItem?
+
+    init(threshold: TimeInterval, onTap: @escaping () -> Void, onHold: @escaping () -> Void) {
+        self.threshold = threshold
+        self.onTap = onTap
+        self.onHold = onHold
     }
-    holdWorkItem = item
-    DispatchQueue.main.asyncAfter(deadline: .now() + holdThreshold, execute: item)
+
+    func keyDown() {
+        if keyIsDown { return } // ignore any stray repeat
+        keyIsDown = true
+        holdFired = false
+        let item = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            self.holdFired = true
+            self.onHold()
+        }
+        holdWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + threshold, execute: item)
+    }
+
+    func keyUp() {
+        guard keyIsDown else { return }
+        keyIsDown = false
+        holdWorkItem?.cancel()
+        holdWorkItem = nil
+        if !holdFired {
+            onTap()
+        }
+    }
 }
 
-func handleKeyUp() {
-    guard keyIsDown else { return }
-    keyIsDown = false
-    holdWorkItem?.cancel()
-    holdWorkItem = nil
-    if !holdFired {
-        onTap()
-    }
-}
+private let moonKey = TapHoldDetector(threshold: holdThreshold, onTap: onTap, onHold: onHold)
 
+func handleKeyDown() { moonKey.keyDown() }
+
+func handleKeyUp() { moonKey.keyUp() }

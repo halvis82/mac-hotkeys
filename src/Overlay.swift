@@ -1,12 +1,5 @@
 import Cocoa
 
-/// Where each tile and each desktop icon sits, shared by drawing and hit testing so the two
-/// can't disagree about what the user is pointing at.
-struct TileLayout {
-    let tileRects: [NSRect]
-    let iconRects: [Int: [NSRect]] // tile index -> icon rects, desktop tiles only
-}
-
 /// Draws the switcher row: one tile per fullscreen window, one per desktop Space.
 final class SwitcherView: NSView {
     var tiles: [Tile] = []
@@ -45,7 +38,9 @@ final class SwitcherView: NSView {
                       height: Self.padding * 2 + Self.tileHeight + Self.labelHeight)
     }
 
-    private func tileRect(_ index: Int) -> NSRect {
+    /// Where a tile sits. Drawing and hit testing both go through this and `iconRects`, so the
+    /// two can't disagree about what the user is pointing at.
+    func tileRect(_ index: Int) -> NSRect {
         NSRect(x: Self.padding + CGFloat(index) * (tileWidth + Self.gap),
                y: Self.padding + Self.labelHeight,
                width: tileWidth,
@@ -53,13 +48,22 @@ final class SwitcherView: NSView {
     }
 
     /// Icon positions inside a desktop tile, laid out as a centered grid.
-    private func iconRects(count: Int, in rect: NSRect) -> [NSRect] {
+    func iconRects(count: Int, in rect: NSRect) -> [NSRect] {
         guard count > 0 else { return [] }
-        let iconSize: CGFloat = min(52, rect.width / 5.2)
+        var iconSize: CGFloat = min(52, rect.width / 5.2)
         let spacing: CGFloat = 9
-        let perRow = max(1, min(count, Int((rect.width - 16) / (iconSize + spacing))))
-        let rows = Int(ceil(Double(count) / Double(perRow)))
-        let gridHeight = CGFloat(rows) * iconSize + CGFloat(rows - 1) * spacing
+        var perRow = 1, rows = 1
+        var gridHeight: CGFloat = 0
+        // Icons shrink only when the grid would otherwise spill out of the tile, which it did
+        // from 13 apps up at full width, drawing over the number badge and the label. Any grid
+        // that already fits keeps exactly the size it always had.
+        repeat {
+            perRow = max(1, min(count, Int((rect.width - 16) / (iconSize + spacing))))
+            rows = Int(ceil(Double(count) / Double(perRow)))
+            gridHeight = CGFloat(rows) * iconSize + CGFloat(rows - 1) * spacing
+            if gridHeight <= rect.height || iconSize <= 6 { break }
+            iconSize -= 1
+        } while true
 
         var rects: [NSRect] = []
         for index in 0..<count {
@@ -102,7 +106,7 @@ final class SwitcherView: NSView {
     }
 
     /// Which tile, and which icon inside it, a point falls on.
-    private func hit(_ point: NSPoint) -> (tile: Int, icon: Int?)? {
+    func hit(_ point: NSPoint) -> (tile: Int, icon: Int?)? {
         for index in tiles.indices {
             let rect = tileRect(index)
             guard rect.insetBy(dx: -Self.gap / 2, dy: -8).contains(point) else { continue }
@@ -321,6 +325,11 @@ final class OverlayPanel: NSPanel {
         backgroundColor = .clear
         hasShadow = false
         hidesOnDeactivate = false
+        // No fade. By default AppKit fades a panel out over about 40ms when it is ordered out,
+        // measured by sampling the screen, so after Cmd was released the switcher lingered on
+        // screen while the switch it had just asked for was already under way. Committing
+        // relies on the overlay being gone within one run-loop turn, and without the fade it is.
+        animationBehavior = .none
         acceptsMouseMovedEvents = true
         ignoresMouseEvents = false
 

@@ -138,10 +138,57 @@ enum WindowActions {
                                     space: SpaceInfo,
                                     sky: SkyLight,
                                     completion: ((Bool) -> Void)?) {
-        openLikeDock(pid: window.pid)
-        correctWindowOnceFrontmost(window: window, space: space, sky: sky,
-                                   deadline: Date().addingTimeInterval(1.5))
-        waitForSpace(space.id, sky: sky, deadline: Date().addingTimeInterval(2.5)) { arrived in
+        let origin = sky.activeSpace
+        let start = Date()
+
+        // Straight there. Activation heads for the app's key window, so if the chosen window
+        // is not it, it is made key first. Without that, activation went to the app's most recent
+        // window and was redirected afterwards, a visible stop at the wrong window on the way.
+        // AX can name an app's key window even while it sits on another Space.
+        let previous = NSWorkspace.shared.frontmostApplication
+        let keyNow = focusedWindowID(ofPID: window.pid)
+        if keyNow == window.id {
+            if verbose { log("  [route] already the app's key window, activating") }
+            openLikeDock(pid: window.pid)
+        } else if !window.isMinimized,
+                  let previous = previous,
+                  // Only handed back to an ordinary app. The hand-back was measured against those;
+                  // loginwindow, or a launcher panel like Spotlight's, is not somewhere to park
+                  // focus even for a moment, so those take the redirect route instead.
+                  previous.activationPolicy == .regular,
+                  previous.processIdentifier != window.pid,
+                  previous.processIdentifier != getpid(),
+                  KeyWindow.makeKey(windowID: window.id, pid: window.pid) {
+            if verbose {
+                log("  [route] key window was \(keyNow.map(String.init) ?? "unknown"), making \(window.id) key, "
+                    + "handing back to \(previous.localizedName ?? "?")")
+            }
+            // The app takes the new key window when it gets round to the event, so wait until
+            // it says so. Handing focus back before then deactivates it with the old key window
+            // still key, and activation goes there: the detour this is here to prevent.
+            whenKey(window.id, of: window.pid, deadline: start.addingTimeInterval(0.08)) { confirmed in
+                if verbose { log("  [route] key window \(confirmed ? "confirmed" : "NOT confirmed") after \(Int(Date().timeIntervalSince(start) * 1000))ms") }
+                // Making it key also put the app in front without moving the screen, and the Dock
+                // only moves to an app when it sees it *become* active. So focus goes back to where
+                // it was for a moment, then the app is activated for real.
+                previous.activate()
+                whenHandedBack(to: previous, from: window.pid, deadline: Date().addingTimeInterval(0.3)) {
+                    if verbose { log("  [route] handed back, activating at \(Int(Date().timeIntervalSince(start) * 1000))ms") }
+                    activateUntilFront(pid: window.pid, attempts: 3)
+                }
+            }
+        } else {
+            if verbose { log("  [route] no direct route (previous=\(previous?.localizedName ?? "none")), activating") }
+            openLikeDock(pid: window.pid)
+        }
+
+        // Kept even on the direct route, as the safety net: if activation still ends up on
+        // another of the app's windows, this presses the right one in the Window menu.
+        correctWindowOnceFrontmost(window: window, space: space, sky: sky, origin: origin,
+                                   start: start, deadline: start.addingTimeInterval(1.5))
+        // Room for two animations back to back: the one activation starts towards the app's
+        // most recent window, and the one the correction then queues behind it.
+        waitForSpace(space.id, sky: sky, deadline: start.addingTimeInterval(3.0)) { arrived in
             if !arrived {
                 log("could not reach space \(space.id) for \(window.appName) wid=\(window.id)")
             }
@@ -149,27 +196,134 @@ enum WindowActions {
         }
     }
 
-    /// Activation brings an app forward on whichever Space holds its most recent window, which
-    /// may not be the window that was picked. Once the app is frontmost its Window menu becomes
-    /// readable, so the exact window can be reached from there.
+    /// Runs `then` once the app reports `windowID` as its key window, or at the deadline.
+    private static func whenKey(_ windowID: CGWindowID,
+                                of pid: pid_t,
+                                deadline: Date,
+                                _ then: @escaping (Bool) -> Void) {
+        if focusedWindowID(ofPID: pid) == windowID { then(true); return }
+        guard Date() < deadline else { then(false); return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.003) {
+            whenKey(windowID, of: pid, deadline: deadline, then)
+        }
+    }
+
+    /// Runs `then` once focus is back with `previous`, and the Dock has had time to notice.
+    ///
+    /// Both halves were measured, starting from a fullscreen Space, 21 switches each:
+    ///
+    /// - Going by AppKit alone (`isActive`, `frontmostApplication`), which trails the window
+    ///   server, the hand-back could be declared done while the window server still had the
+    ///   target in front, and activating an app already in front does nothing.
+    /// - Going by the window server as well, the hand-back is often complete within a
+    ///   millisecond, and activating the target at once worked only 12 times in 21. The target
+    ///   came to the front every time, but the Space never changed. The Dock, which does the
+    ///   switching, learns of app changes a little later, and a target that was in front, left
+    ///   and came back within a few milliseconds never looked to it like an app becoming active.
+    ///   Waiting 40ms after the hand-back worked 21 of 21, as did 80ms. 50ms is used.
+    private static let dockNoticeDelay: TimeInterval = 0.05
+
+    private static func whenHandedBack(to previous: NSRunningApplication,
+                                       from target: pid_t,
+                                       deadline: Date,
+                                       _ then: @escaping () -> Void) {
+        let windowServer = KeyWindow.isFront(pid: previous.processIdentifier) != false
+        let appKit = previous.isActive
+            && NSWorkspace.shared.frontmostApplication?.processIdentifier == previous.processIdentifier
+            && NSRunningApplication(processIdentifier: target)?.isActive != true
+        if (windowServer && appKit) || Date() >= deadline {
+            DispatchQueue.main.asyncAfter(deadline: .now() + dockNoticeDelay, execute: then)
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.003) {
+            whenHandedBack(to: previous, from: target, deadline: deadline, then)
+        }
+    }
+
+    /// Activates the app the Dock's way and checks the window server took it, asking again if
+    /// not. An activation request can be dropped outright, and a dropped one leaves the user
+    /// where they were with nothing happening; in successful switches the app is in front within
+    /// 30ms, so 150ms without it means it will not come.
+    private static func activateUntilFront(pid: pid_t, attempts: Int) {
+        openLikeDock(pid: pid)
+        guard attempts > 1 else { return }
+        let asked = Date()
+        func check() {
+            if KeyWindow.isFront(pid: pid) != false { return }
+            if Date().timeIntervalSince(asked) < 0.15 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.01, execute: check)
+                return
+            }
+            if verbose { log("  [activation dropped, asking again]") }
+            activateUntilFront(pid: pid, attempts: attempts - 1)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.01, execute: check)
+    }
+
+    /// Whether activating the app has got as far as deciding where to go.
+    ///
+    /// The app reports itself active the moment LaunchServices is asked, well before macOS has
+    /// started moving to the app's most recent window. A Window-menu press made in that gap is
+    /// swallowed: the move to the recent window goes ahead regardless, and the press is lost.
+    /// That is what sent Cmd+Tab from the desktop to the *other* Chrome window every time: in
+    /// Chrome window A, over to the desktop, then to Chrome window B, landed back on A.
+    ///
+    /// A press made once the move has begun is queued behind it by macOS, and lands. Measured
+    /// both ways, 4 of 4 each: pressing on activation failed every time, pressing once the Space
+    /// had started changing worked every time and cost one extra animation. The app's recent
+    /// window can also be on the Space we are already on, in which case nothing moves, and that
+    /// shows as the app's focused window being here.
+    private static func activationHasLanded(pid: pid_t, origin: UInt64, sky: SkyLight) -> Bool {
+        let active = sky.activeSpace
+        if active != origin { return true }
+        return activationHasLanded(activeSpace: active, origin: origin,
+                                   focusedWindowSpace: focusedWindowID(ofPID: pid).flatMap(sky.space(ofWindow:)))
+    }
+
+    /// The pure half of the above, so the rule can be tested without moving the screen.
+    static func activationHasLanded(activeSpace: UInt64, origin: UInt64, focusedWindowSpace: UInt64?) -> Bool {
+        activeSpace != origin || focusedWindowSpace == origin
+    }
+
+    /// Activation brings an app forward on whichever Space holds its key window. With KeyWindow
+    /// that is the window that was picked, but if it could not be used, or macOS went elsewhere
+    /// anyway, it is the app's most recent window. Once the app is frontmost its Window menu
+    /// becomes readable, so the exact window can be reached from there.
     ///
     /// Polled rather than delayed by a fixed amount: waiting a flat half second made every
-    /// switch feel slower than the system animation it replaced.
+    /// switch feel slower than the system animation it replaced. A press that does not arrive is
+    /// tried again until the deadline, because a lost press otherwise leaves the user on the
+    /// wrong window with nothing left to put it right.
     private static func correctWindowOnceFrontmost(window: WindowInfo,
                                                    space: SpaceInfo,
                                                    sky: SkyLight,
+                                                   origin: UInt64,
+                                                   start: Date,
                                                    deadline: Date) {
         if sky.activeSpace == space.id { return } // activation already landed correctly
         guard Date() < deadline else { return }
-        if NSRunningApplication(processIdentifier: window.pid)?.isActive == true {
+        // If the landing is never seen, press anyway after a while, as this always used to.
+        let landed = activationHasLanded(pid: window.pid, origin: origin, sky: sky)
+            || Date().timeIntervalSince(start) > 0.8
+        if landed, NSRunningApplication(processIdentifier: window.pid)?.isActive == true {
             let entries = windowMenuEntries(for: window)
+            if verbose {
+                log("  [correct] landed, activeSpace=\(sky.activeSpace), \(entries.count) menu entries for \"\(window.title)\"")
+            }
             if !entries.isEmpty {
-                press(entries, from: 0, space: space, sky: sky) { _ in }
+                press(entries, from: 0, space: space, sky: sky) { arrived in
+                    trace("correction press \(arrived ? "arrived" : "did NOT arrive")", sky, window)
+                    if !arrived {
+                        correctWindowOnceFrontmost(window: window, space: space, sky: sky, origin: origin,
+                                                   start: start, deadline: deadline)
+                    }
+                }
                 return
             }
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
-            correctWindowOnceFrontmost(window: window, space: space, sky: sky, deadline: deadline)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) {
+            correctWindowOnceFrontmost(window: window, space: space, sky: sky, origin: origin,
+                                       start: start, deadline: deadline)
         }
     }
 
@@ -264,33 +418,51 @@ enum WindowActions {
             }
         }
 
+        let labels = entries.map { string($0, kAXTitleAttribute as String) }
+        // "AXMenuItemMarkChar" spelled out: the constant is not exposed to Swift.
+        let order = windowMenuCandidates(labels: labels, windowTitle: title) {
+            !string(entries[$0], "AXMenuItemMarkChar").isEmpty
+        }
+        if order.count > 1 {
+            log("\(order.count) Window-menu entries match \"\(title)\"; "
+                + "trying the unchecked one first")
+        }
+        return order.map { entries[$0] }
+    }
+
+    /// Which Window-menu entries could stand for a window with this title, best first, as
+    /// indices into `labels`.
+    ///
+    /// `isChecked` is asked only about entries that match, since each answer is a round trip
+    /// into the app.
+    static func windowMenuCandidates(labels: [String],
+                                     windowTitle: String,
+                                     isChecked: (Int) -> Bool) -> [Int] {
+        let title = windowTitle.trimmingCharacters(in: .whitespaces)
+        guard !title.isEmpty else { return [] }
+
         // Only the last section of the menu, which is where AppKit puts the window list. The rest
         // is commands, and their names collide with real window titles: Chrome's Window menu has
         // a "Downloads" command while a Finder window is often called "Downloads". Searching the
         // whole menu would press the command. Separators come through as empty-titled entries,
         // so the window list is everything past the last one.
-        if let lastSeparator = entries.lastIndex(where: { string($0, kAXTitleAttribute as String).isEmpty }) {
-            entries = Array(entries[(lastSeparator + 1)...])
+        var range = labels.indices
+        if let lastSeparator = labels.lastIndex(where: { $0.isEmpty }) {
+            range = (lastSeparator + 1)..<labels.endIndex
         }
 
         // An entry matches if it starts with the window title, which covers apps that append to
         // it, or if it is the title cut short with an ellipsis, which covers menus truncating a
         // long one. Deliberately not "the title starts with the entry" in general: that would
         // let the Zoom command claim a window called "Zoom Meeting".
-        let matches = entries.filter {
-            let label = string($0, kAXTitleAttribute as String)
+        let matches = range.filter { index in
+            let label = labels[index]
             guard !label.isEmpty else { return false }
             if label.hasPrefix(title) { return true }
             return label.hasSuffix("\u{2026}") && title.hasPrefix(String(label.dropLast()))
         }
-        // "AXMenuItemMarkChar" spelled out: the constant is not exposed to Swift.
-        let isCurrent = { (entry: AXUIElement) in !string(entry, "AXMenuItemMarkChar").isEmpty }
-        let ordered = matches.filter { !isCurrent($0) } + matches.filter(isCurrent)
-        if matches.count > 1 {
-            log("\(matches.count) Window-menu entries match \"\(title)\"; "
-                + "trying the unchecked one first")
-        }
-        return ordered
+        let checked = Set(matches.filter(isChecked))
+        return matches.filter { !checked.contains($0) } + matches.filter { checked.contains($0) }
     }
 
     private static func focusNow(window: WindowInfo,

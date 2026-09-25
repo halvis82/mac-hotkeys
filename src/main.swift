@@ -7,27 +7,6 @@ import Cocoa
 // time anything was rebuilt. They share most of their machinery anyway, so they are now a
 // single process with a single event tap: grant it once and everything works.
 
-private let logClock: DateFormatter = {
-    let f = DateFormatter()
-    f.dateFormat = "HH:mm:ss"
-    return f
-}()
-
-func log(_ message: String) {
-    let line = "\(logClock.string(from: Date())) mac-hotkeys: \(message)\n"
-    FileHandle.standardError.write(line.data(using: .utf8)!)
-}
-
-let dndKeyCode: Int64 = 178   // F6, the moon key, when Fn is not held
-let graveKeyCode: Int64 = 50  // `
-let tabKeyCode: Int64 = 48
-let escKeyCode: Int64 = 53
-let leftArrowKeyCode: Int64 = 123
-let rightArrowKeyCode: Int64 = 124
-/// Virtual key codes for 1...9, in order, on both the number row and the keypad.
-let digitKeyCodes: [Int64] = [18, 19, 20, 21, 23, 22, 26, 28, 25]
-let keypadDigitKeyCodes: [Int64] = [83, 84, 85, 86, 87, 88, 89, 91, 92]
-
 guard let sky = SkyLight() else {
     log("could not resolve SkyLight symbols - macOS may have changed them")
     exit(1)
@@ -102,31 +81,20 @@ func makeEventTap() -> CFMachPort? {
             }
 
             let switcher = Runtime.switcher!
-            let code = event.getIntegerValueField(.keyboardEventKeycode)
-
-            // --- Focus toggle: the F6 moon key, tap versus hold ---
-            if code == dndKeyCode, type == .keyDown || type == .keyUp {
-                if type == .keyDown {
-                    DispatchQueue.main.async { handleKeyDown() }
-                } else {
-                    DispatchQueue.main.async { handleKeyUp() }
-                }
-                return nil // swallow, so the system's own DND toggle never sees it
-            }
-
-            // --- Switcher: Command being released is what commits ---
-            if type == .flagsChanged {
-                if switcher.isOpen && !event.flags.contains(.maskCommand) {
-                    DispatchQueue.main.async { switcher.commit() }
-                }
-                return Unmanaged.passUnretained(event)
-            }
-
-            guard type == .keyDown else { return Unmanaged.passUnretained(event) }
-
-            // --- Switcher: Cmd+Tab ---
-            if code == tabKeyCode, event.flags.contains(.maskCommand) {
-                let backwards = event.flags.contains(.maskShift)
+            let action = routeKey(type: type,
+                                  code: event.getIntegerValueField(.keyboardEventKeycode),
+                                  flags: event.flags,
+                                  switcherOpen: switcher.isOpen)
+            switch action {
+            case .pass:
+                break
+            case .focusKeyDown:
+                DispatchQueue.main.async { handleKeyDown() }
+            case .focusKeyUp:
+                DispatchQueue.main.async { handleKeyUp() }
+            case .commit:
+                DispatchQueue.main.async { switcher.commit() }
+            case .tab(let backwards):
                 DispatchQueue.main.async {
                     if switcher.isOpen {
                         switcher.advance(by: backwards ? -1 : 1)
@@ -134,38 +102,18 @@ func makeEventTap() -> CFMachPort? {
                         switcher.open(backwards: backwards)
                     }
                 }
-                return nil
-            }
-
-            // --- Fullscreen cycle: Cmd+` ---
-            if code == graveKeyCode,
-               event.flags.contains(.maskCommand),
-               !event.flags.contains(.maskControl),
-               !event.flags.contains(.maskAlternate) {
+            case .cycle:
                 DispatchQueue.main.async { cycleWindow(Runtime.sky, dryRun: Runtime.dryRun) }
-                return nil
-            }
-
-            // --- Keys that only mean something while the switcher is open ---
-            guard switcher.isOpen else { return Unmanaged.passUnretained(event) }
-            switch code {
-            case escKeyCode:
+            case .cancel:
                 DispatchQueue.main.async { switcher.cancel() }
-                return nil
-            case leftArrowKeyCode:
-                DispatchQueue.main.async { switcher.moveWithinDesktop(by: -1) }
-                return nil
-            case rightArrowKeyCode:
-                DispatchQueue.main.async { switcher.moveWithinDesktop(by: 1) }
-                return nil
-            case _ where digitKeyCodes.contains(code) || keypadDigitKeyCodes.contains(code):
-                let position = digitKeyCodes.firstIndex(of: code)
-                    ?? keypadDigitKeyCodes.firstIndex(of: code)!
+            case .moveWithinDesktop(let step):
+                DispatchQueue.main.async { switcher.moveWithinDesktop(by: step) }
+            case .select(let position):
                 DispatchQueue.main.async { switcher.select(position: position) }
-                return nil
-            default:
-                return Unmanaged.passUnretained(event)
             }
+            // Swallowed keys never reach the system, so the moon key's own DND toggle and the
+            // Dock's Cmd+Tab both stay out of it.
+            return action.swallows ? nil : Unmanaged.passUnretained(event)
         },
         userInfo: nil
     )
