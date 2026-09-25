@@ -112,6 +112,11 @@ prints the code of any other key. More detail is in `NOTES-focus-key.md`.
   and `uninstall.sh`. Change both to your own if you like; permissions are granted per
   identifier, so it means granting them again.
 
+## License
+
+MIT, see [LICENSE](LICENSE). It relies on private macOS APIs (explained below), so a future
+macOS update can break parts of it.
+
 # How it works
 
 The rest of this is the design notes: what each part does and why, most of it learned the hard
