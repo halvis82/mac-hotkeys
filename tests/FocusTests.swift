@@ -84,8 +84,8 @@ func focusTests() {
         func json(_ text: String) -> Data { text.data(using: .utf8)! }
 
         test("names come from the config file") {
-            let names = MoonKeyShortcuts.parse(json(#"{"tap": "dnd on", "hold": "nothing on", "off": "dnd/nothing off"}"#))
-            expectEqual(names, MoonKeyShortcuts(tap: "dnd on", hold: "nothing on", off: "dnd/nothing off"))
+            let names = MoonKeyShortcuts.parse(json(#"{"tap": "My DND on", "hold": "My Work on", "off": "My Focus off"}"#))
+            expectEqual(names, MoonKeyShortcuts(tap: "My DND on", hold: "My Work on", off: "My Focus off"))
         }
 
         test("any name left out, blank or not a string keeps its default") {

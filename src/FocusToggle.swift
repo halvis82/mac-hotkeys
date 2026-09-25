@@ -14,7 +14,7 @@ private let holdThreshold: TimeInterval = 0.35
 /// Which shortcuts the moon key runs, by name.
 ///
 /// Set in ~/.config/mac-hotkeys/moon-key.json, for example
-///     {"tap": "dnd on", "hold": "nothing on", "off": "dnd/nothing off"}
+///     {"tap": "My DND on", "hold": "My Work on", "off": "My Focus off"}
 /// Any name left out, or the whole file, falls back to the defaults below. Read again, along with
 /// which shortcuts exist, in the background on every press, so an edit applies from the press
 /// after it has been noticed, with no restart.
