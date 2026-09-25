@@ -7,8 +7,7 @@ settings.
   fullscreen Spaces, and goes straight to the one you pick. Replaces the built-in Cmd+Tab.
 - **Cmd+\`**: cycles the front app's windows, including fullscreen ones, which the built-in
   version skips.
-- **The moon key** (Do Not Disturb, shared with F6): tap or hold to turn a Focus mode on,
-  either to turn it off. You choose the Focus modes, see below.
+- **The moon key** (shared with F6): tap and hold each run a Shortcut of your choice.
 
 ## Using the switcher
 
@@ -19,8 +18,8 @@ switch.
 
 ## Install
 
-Needs macOS 14 or later and the Xcode Command Line Tools (`xcode-select --install`). Nothing
-else.
+Needs macOS 14 or later and the Xcode Command Line Tools (`xcode-select --install`). No other
+dependencies.
 
 ```sh
 git clone https://github.com/halvis82/mac-hotkeys.git
@@ -56,16 +55,12 @@ rm /tmp/k.pem /tmp/c.cer /tmp/id.p12
 
 ## Setting up the moon key
 
-macOS only lets apps set a Focus through Shortcuts, so the moon key runs three shortcuts you
-make in the Shortcuts app:
+Tapping the moon key runs a shortcut called **Moon Key Tap**, and holding it runs **Moon Key
+Hold**. If a Focus mode is already on, either one runs **Moon Key Off** instead. Make those
+three in the Shortcuts app, with whatever actions you want, for example Do Not Disturb on, some
+other Focus mode on, and Focus off.
 
-| Shortcut | Runs when | Typical action |
-|---|---|---|
-| **Moon Key Tap** | tapped, with no Focus on | Set Focus: Do Not Disturb, on |
-| **Moon Key Hold** | held, with no Focus on | Set Focus: any Focus you like, on |
-| **Moon Key Off** | tapped or held, with a Focus on | Turn Focus Off |
-
-Until all three exist, the moon key keeps working as normal.
+Until they exist, the moon key works as normal.
 
 ## More
 
