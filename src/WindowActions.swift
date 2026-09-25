@@ -86,10 +86,39 @@ enum WindowActions {
         NSWorkspace.shared.openApplication(at: url, configuration: configuration)
     }
 
+    /// Where all navigation runs: every wait, poll and AX call from the moment a switch starts.
+    ///
+    /// It used to run on the main thread, polling AX every few tens of milliseconds for up to
+    /// 1.5 seconds after each switch, and an AX call blocks until the app answers, up to the
+    /// 200ms timeout while an app is busy activating. A Cmd+Tab pressed in that window, which is
+    /// exactly when people press it again, waited behind those calls. Serial, so no two steps
+    /// ever run at once; the timed polls of two switches in quick succession can still take
+    /// turns, as they always could on the main queue.
+    static let queue = DispatchQueue(label: "navigation", qos: .userInteractive)
+
+    /// Goes to `window`, whichever route that takes. Returns at once; the work happens on
+    /// `queue`, and `completion` is called on the main thread.
     static func activate(window: WindowInfo,
                          space: SpaceInfo,
                          _ sky: SkyLight,
                          completion: ((Bool) -> Void)? = nil) {
+        // Read here, on the caller's thread, which is the main thread: the app the user is in
+        // as the switch starts, and AppKit's frontmost-app property is meant to be read there.
+        let front = NSWorkspace.shared.frontmostApplication
+        queue.async {
+            navigate(window: window, space: space, front: front, sky) { arrived in
+                if let completion = completion {
+                    DispatchQueue.main.async { completion(arrived) }
+                }
+            }
+        }
+    }
+
+    private static func navigate(window: WindowInfo,
+                                 space: SpaceInfo,
+                                 front: NSRunningApplication?,
+                                 _ sky: SkyLight,
+                                 completion: ((Bool) -> Void)? = nil) {
         trace("commit start, target space \(space.id)", sky, window)
 
         // Already there: nothing to navigate, just focus it. Raising by window id is exact, so
@@ -113,13 +142,13 @@ enum WindowActions {
                 } else {
                     log("Window menu did not reach space \(space.id) for \"\(window.title)\"; "
                         + "falling back to activating the app")
-                    activateApp(window: window, space: space, sky: sky, completion: completion)
+                    activateApp(window: window, space: space, front: front, sky: sky, completion: completion)
                 }
             }
             return
         }
 
-        activateApp(window: window, space: space, sky: sky, completion: completion)
+        activateApp(window: window, space: space, front: front, sky: sky, completion: completion)
     }
 
     /// Bring the app forward and then correct which of its windows is showing.
@@ -136,6 +165,7 @@ enum WindowActions {
     /// animation stays.
     private static func activateApp(window: WindowInfo,
                                     space: SpaceInfo,
+                                    front previous: NSRunningApplication?,
                                     sky: SkyLight,
                                     completion: ((Bool) -> Void)?) {
         let origin = sky.activeSpace
@@ -145,7 +175,6 @@ enum WindowActions {
         // is not it, it is made key first. Without that, activation went to the app's most recent
         // window and was redirected afterwards, a visible stop at the wrong window on the way.
         // AX can name an app's key window even while it sits on another Space.
-        let previous = NSWorkspace.shared.frontmostApplication
         let keyNow = focusedWindowID(ofPID: window.pid)
         if keyNow == window.id {
             if verbose { log("  [route] already the app's key window, activating") }
@@ -203,7 +232,7 @@ enum WindowActions {
                                 _ then: @escaping (Bool) -> Void) {
         if focusedWindowID(ofPID: pid) == windowID { then(true); return }
         guard Date() < deadline else { then(false); return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.003) {
+        queue.asyncAfter(deadline: .now() + 0.003) {
             whenKey(windowID, of: pid, deadline: deadline, then)
         }
     }
@@ -229,13 +258,12 @@ enum WindowActions {
                                        _ then: @escaping () -> Void) {
         let windowServer = KeyWindow.isFront(pid: previous.processIdentifier) != false
         let appKit = previous.isActive
-            && NSWorkspace.shared.frontmostApplication?.processIdentifier == previous.processIdentifier
             && NSRunningApplication(processIdentifier: target)?.isActive != true
         if (windowServer && appKit) || Date() >= deadline {
-            DispatchQueue.main.asyncAfter(deadline: .now() + dockNoticeDelay, execute: then)
+            queue.asyncAfter(deadline: .now() + dockNoticeDelay, execute: then)
             return
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.003) {
+        queue.asyncAfter(deadline: .now() + 0.003) {
             whenHandedBack(to: previous, from: target, deadline: deadline, then)
         }
     }
@@ -251,13 +279,13 @@ enum WindowActions {
         func check() {
             if KeyWindow.isFront(pid: pid) != false { return }
             if Date().timeIntervalSince(asked) < 0.15 {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.01, execute: check)
+                queue.asyncAfter(deadline: .now() + 0.01, execute: check)
                 return
             }
             if verbose { log("  [activation dropped, asking again]") }
             activateUntilFront(pid: pid, attempts: attempts - 1)
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.01, execute: check)
+        queue.asyncAfter(deadline: .now() + 0.01, execute: check)
     }
 
     /// Whether activating the app has got as far as deciding where to go.
@@ -321,7 +349,7 @@ enum WindowActions {
                 return
             }
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) {
+        queue.asyncAfter(deadline: .now() + 0.02) {
             correctWindowOnceFrontmost(window: window, space: space, sky: sky, origin: origin,
                                        start: start, deadline: deadline)
         }
@@ -341,7 +369,7 @@ enum WindowActions {
                                      _ done: @escaping (Bool) -> Void) {
         if sky.activeSpace == id { done(true); return }
         guard Date() < deadline else { done(false); return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
+        queue.asyncAfter(deadline: .now() + 0.03) {
             waitForSpace(id, sky: sky, deadline: deadline, done)
         }
     }
@@ -490,7 +518,7 @@ enum WindowActions {
             guard sky.activeSpace == space.id else { return }
             if raise(windowID: window.id, ofPID: window.pid) { return }
             guard Date() < deadline else { return }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) { attemptRaise() }
+            queue.asyncAfter(deadline: .now() + 0.06) { attemptRaise() }
         }
         attemptRaise()
     }
@@ -512,10 +540,10 @@ final class MRUTracker {
             guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
             else { return }
             // The app has just come forward but may not have settled its focused window yet.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-                if let id = WindowActions.focusedWindowID(ofPID: app.processIdentifier) {
-                    self?.record(id)
-                }
+            // Asked off the main thread: the app may take a while to answer while activating.
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.12) {
+                guard let id = WindowActions.focusedWindowID(ofPID: app.processIdentifier) else { return }
+                DispatchQueue.main.async { self?.record(id) }
             }
         }
     }

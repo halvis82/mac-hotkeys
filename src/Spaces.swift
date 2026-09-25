@@ -89,8 +89,10 @@ final class SkyLight {
         (Int32, UInt32, CFArray, UInt32, UnsafeMutablePointer<UInt64>, UnsafeMutablePointer<UInt64>) -> Unmanaged<CFArray>?
 
     /// Optional, unlike the symbols above: without it `spaces(ofWindowsOn:)` returns nil and
-    /// callers ask window by window instead.
-    private lazy var copyWindowsWithOptionsAndTags: CopyWindowsWithOptionsAndTagsFn? = {
+    /// callers ask window by window instead. A constant rather than a lazy var, because the
+    /// switcher looks at windows from more than one thread and lazy initialization is not safe
+    /// to race.
+    private static let copyWindowsWithOptionsAndTags: CopyWindowsWithOptionsAndTagsFn? = {
         guard let handle = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_NOW),
               let symbol = dlsym(handle, "SLSCopyWindowsWithOptionsAndTags")
         else { return nil }
@@ -104,7 +106,7 @@ final class SkyLight {
     /// agreed for all 65. Options 0x7 matter: 0x2, which yabai uses for visible windows, left
     /// out 5 of the 65, windows the per-window query places on a Space.
     func spaces(ofWindowsOn spaceIDs: [UInt64]) -> [CGWindowID: [UInt64]]? {
-        guard let copyWindows = copyWindowsWithOptionsAndTags else { return nil }
+        guard let copyWindows = SkyLight.copyWindowsWithOptionsAndTags else { return nil }
         var result: [CGWindowID: [UInt64]] = [:]
         for spaceID in spaceIDs {
             var setTags: UInt64 = 0

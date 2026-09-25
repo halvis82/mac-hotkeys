@@ -7,6 +7,8 @@ import Cocoa
 // time anything was rebuilt. They share most of their machinery anyway, so they are now a
 // single process with a single event tap: grant it once and everything works.
 
+trimLogIfLarge()
+
 guard let sky = SkyLight() else {
     log("could not resolve SkyLight symbols - macOS may have changed them")
     exit(1)
@@ -38,11 +40,20 @@ if CommandLine.arguments.contains("--dump") {
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 
+// Not a background process as far as the scheduler is concerned. Idle agents get App Nap:
+// their timers are coalesced and their wakeups deferred, so the first Cmd+Tab after a quiet
+// spell waited on the process waking up. Held for the life of the process. Idle sleep is still
+// allowed; this only asks for prompt handling while awake.
+let latencyActivity = ProcessInfo.processInfo.beginActivity(
+    options: [.userInitiatedAllowingIdleSystemSleep, .latencyCritical],
+    reason: "Hotkeys must respond the moment they are pressed")
+
 enum Runtime {
     static var sky: SkyLight!
     static var switcher: SwitcherController!
     static var dryRun = false
     static var tap: CFMachPort?
+    static var tapThread: Thread?
 }
 Runtime.sky = sky
 Runtime.switcher = SwitcherController(sky: sky)
@@ -50,7 +61,8 @@ Runtime.switcher = SwitcherController(sky: sky)
 if let index = CommandLine.arguments.firstIndex(of: "--show") {
     let seconds = index + 1 < CommandLine.arguments.count
         ? (Double(CommandLine.arguments[index + 1]) ?? 3.0) : 3.0
-    Runtime.switcher.open(backwards: false)
+    Runtime.switcher.open(backwards: false, session: SwitcherGate.raise(),
+                          timing: OpenTiming(pressedAt: nil, tappedAt: Clock.now))
     DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { exit(0) }
     app.run()
 }
@@ -81,10 +93,32 @@ func makeEventTap() -> CFMachPort? {
             }
 
             let switcher = Runtime.switcher!
+            let tappedAt = Clock.now
+            // Command going down may be the start of a Cmd+Tab: wake the apps now, so their
+            // answers are in by the time Tab is. This does cost something: every Command press,
+            // Cmd+C included, lists the windows and asks each app a question, at most once per
+            // 300ms. It is a few milliseconds of work, and it is what keeps the first Cmd+Tab
+            // after a quiet spell from waiting on apps to wake up. Any other key pressed with
+            // Command down may change the windows (Cmd+N, Cmd+W), so earlier answers stop
+            // counting as fresh.
+            if !SwitcherGate.isActive {
+                if type == .flagsChanged, event.flags.contains(.maskCommand) {
+                    WindowLister.warm(Runtime.sky)
+                } else if type == .keyDown, event.flags.contains(.maskCommand),
+                          event.getIntegerValueField(.keyboardEventKeycode) != tabKeyCode {
+                    WindowLister.invalidateAnswers()
+                }
+            }
+            // A key typed without Command while the switcher thinks it is up means the release
+            // of Command was missed somehow. Close it, and let the key through as typed.
+            if type == .keyDown, SwitcherGate.isActive, !event.flags.contains(.maskCommand) {
+                SwitcherGate.lower()
+                DispatchQueue.main.async { switcher.cancel() }
+            }
             let action = routeKey(type: type,
                                   code: event.getIntegerValueField(.keyboardEventKeycode),
                                   flags: event.flags,
-                                  switcherOpen: switcher.isOpen)
+                                  switcherOpen: SwitcherGate.isActive)
             switch action {
             case .pass:
                 break
@@ -93,18 +127,23 @@ func makeEventTap() -> CFMachPort? {
             case .focusKeyUp:
                 DispatchQueue.main.async { handleKeyUp() }
             case .commit:
+                SwitcherGate.lower()
                 DispatchQueue.main.async { switcher.commit() }
             case .tab(let backwards):
+                let session = SwitcherGate.raise()
+                let pressedAt = Clock.ticks(ofEventTimestamp: event.timestamp, now: tappedAt)
                 DispatchQueue.main.async {
                     if switcher.isOpen {
                         switcher.advance(by: backwards ? -1 : 1)
                     } else {
-                        switcher.open(backwards: backwards)
+                        switcher.open(backwards: backwards, session: session,
+                                      timing: OpenTiming(pressedAt: pressedAt, tappedAt: tappedAt))
                     }
                 }
             case .cycle:
                 DispatchQueue.main.async { cycleWindow(Runtime.sky, dryRun: Runtime.dryRun) }
             case .cancel:
+                SwitcherGate.lower()
                 DispatchQueue.main.async { switcher.cancel() }
             case .moveWithinDesktop(let step):
                 DispatchQueue.main.async { switcher.moveWithinDesktop(by: step) }
@@ -149,11 +188,22 @@ func startWhenPermitted() {
     }
 
     Runtime.tap = tap
-    CFRunLoopAddSource(CFRunLoopGetCurrent(),
-                       CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0),
-                       .commonModes)
-    CGEvent.tapEnable(tap: tap, enable: true)
+    // The tap runs on a thread of its own. It sits in front of every keystroke on the system and
+    // macOS waits for its answer, so on the main thread anything that held the main thread,
+    // drawing the switcher or waiting on a slow app, delayed typing everywhere and left Cmd+Tab
+    // queued behind it. The callback only reads the gate and hops to the main queue.
+    let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+    let tapThread = Thread {
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+        CFRunLoopRun()
+    }
+    tapThread.name = "event tap"
+    tapThread.qualityOfService = .userInteractive
+    tapThread.start()
+    Runtime.tapThread = tapThread
     log("running (pid \(ProcessInfo.processInfo.processIdentifier)) - F6 focus, Cmd+` cycle, Cmd+Tab switcher")
+    Runtime.switcher.prewarm()
 }
 
 startWhenPermitted()

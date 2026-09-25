@@ -56,6 +56,7 @@ No sudo needed: trusting it in the user domain is enough.
 ./test.sh --live    # also against the real window server, AX and screen capture
 ./test.sh --bench   # also times the switcher's hot paths, before against after
 ./test.sh --navigation  # really switches Spaces for about a minute, see below
+./test.sh --keys    # types real Cmd+Tab into the installed agent and times it, see below
 ```
 
 The unit tests cover every key-routing rule, which windows get admitted, how the row is
@@ -75,6 +76,12 @@ the Space it ends on, the path it took (sampled every 5ms, which must go straigh
 the screen itself against the target window's own pixels. It ends with a 30-hop random tour,
 since a Space entered the wrong way poisons the switches *after* it. It refuses to run while the
 screen is locked, when every switch fails for reasons that have nothing to do with the code.
+
+`--keys` needs the agent installed. After a few idle seconds each time, it types a real
+Cmd+Tab, checks the panel is up, and cancels with Escape, so nothing switches; then reads the
+agent's log for how long each took from the key's own timestamp, which is the delay a person
+feels. It ends with one very quick Cmd+Tab tap, which does switch, to check the release is never
+missed and the switcher never left stuck open.
 
 ## Going straight to a window
 
@@ -105,6 +112,53 @@ and each one is load-bearing:
   33ms, and some apps never report it at all while in the background.
 
 If any of it fails, the Window-menu redirect is still there as a safety net.
+
+## Which windows show
+
+Apps own far more windows than they show: toolbars, popups, invisible helpers. A window counts
+if it belongs to an ordinary app and sits on a Space; on the current Space, AX also has to
+vouch for it; and on a fullscreen Space it has to fill the screen the way a fullscreen or
+split-view window does: at least 40% of the biggest window's area, 70% of the tallest's height,
+and titled if the same app has a titled window there. The height and title tests were added
+when Chrome's address-bar suggestions, a separate window that grows with the list, reached 41%
+of the area and showed up as a second Chrome window.
+
+## Starting at login
+
+`install.sh` installs a LaunchAgent: `RunAtLoad` starts the agent at every login, `KeepAlive`
+restarts it if it ever exits, and `ProcessType` `Interactive` keeps launchd from running it as a
+throttled background job. It keeps no state worth saving between restarts, since window ids do
+not survive one; what does persist is the permission grants, as long as the build is signed
+with a stable identity (see Signing).
+
+## Keeping Cmd+Tab instant
+
+The switcher sometimes took around 300ms to appear. Three separate things were behind it, found
+by timing each phase after the machine had sat idle for a few seconds, which is when it happened:
+
+- **The agent itself was being put to sleep.** An idle agent gets App Nap, and launchd ran it
+  as a background job. Window-server calls that take 1ms took 50 to 120ms on the first keypress
+  after a quiet spell. The agent now holds a latency-critical activity for its whole life and
+  runs as `Interactive`.
+- **Other apps were asleep too.** Each app is asked over AX which of its windows are real, and
+  a napping app takes 10 to 65ms to wake and answer the first question, sometimes the full
+  200ms timeout; after that, a millisecond. So the questions now go out when Command goes down,
+  and the apps wake in the gap before Tab. Opening waits at most 30ms for any app still asleep
+  and uses its previous answer otherwise, through rules that stop an old answer hiding a window
+  opened since. Any other key pressed with Command down (Cmd+N, Cmd+W) makes the early answers
+  count as stale again.
+- **The main thread was busy.** The keyboard tap lived on the main thread, and so did every
+  wait and AX poll of a switch in progress, for up to 1.5 seconds after it. A Cmd+Tab in that
+  time queued behind them. The tap now has its own thread, and switching runs on its own queue.
+
+Measured with 4 seconds idle before each open, from Tab to the row being ready, 20 opens:
+original code 45ms median, 133ms p90, 253ms worst; now 3.8ms median, 5.7ms p90. Every open now
+logs where its time went, from the key's own timestamp, so any delay that comes back names its
+cause:
+
+```
+open: 4 tiles, sel 2, 9ms (key 0.4, wait 0.1, windows 4.1, panel 3.9), winSpace=none
+```
 
 ## Where the switcher's time goes
 

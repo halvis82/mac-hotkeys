@@ -85,6 +85,14 @@ struct SwitcherModel {
     }
 }
 
+/// When the keypress that opened the switcher happened, for the log line that times each open.
+struct OpenTiming {
+    /// The key event's own timestamp, in mach ticks, when it could be read.
+    let pressedAt: UInt64?
+    /// When the event tap saw it.
+    let tappedAt: UInt64
+}
+
 /// Drives the switcher: builds the row when Cmd+Tab opens it, tracks the highlight while Cmd
 /// is held, and acts on the selection when Cmd is let go.
 final class SwitcherController {
@@ -96,6 +104,8 @@ final class SwitcherController {
     private(set) var isOpen = false
     private let verbose = CommandLine.arguments.contains("--verbose")
     private var openedAtWindow: CGWindowID?
+    /// The gate session this open belongs to, so closing only lowers the gate for that one.
+    private var gateSession: UInt64 = 0
     /// Bumped on every open, so a thumbnail still being captured for an earlier open can't
     /// land in this one.
     private var generation = 0
@@ -130,6 +140,32 @@ final class SwitcherController {
         panel.refresh(selected: model.selected, desktopSelection: model.desktopSelection)
     }
 
+    /// Does once, at launch, everything the first open would otherwise do cold.
+    ///
+    /// Measured cold against warm: building the panel 21 to 28ms against 1 to 2, loading app
+    /// icons 14ms against 1, the first AX round trip to each app several milliseconds. Without
+    /// this the first Cmd+Tab after logging in, or after the agent restarted, was the slow one.
+    func prewarm() {
+        // Budgeted like an open: at login apps are busy starting up and can take seconds to
+        // answer, and this runs on the main thread. Whatever is late is warmed up anyway.
+        let snapshot = WindowLister.snapshot(sky, wantKeyWindows: true,
+                                             frontPID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+                                             budget: 0.5)
+        let tiles = WindowLister.tiles(from: snapshot, recency: { [mru] in mru.rank(of: $0) })
+        let scratch = SwitcherView()
+        scratch.tiles = tiles
+        scratch.frame = NSRect(origin: .zero, size: scratch.layoutSize(maxWidth: 1400))
+        if let rep = scratch.bitmapImageRepForCachingDisplay(in: scratch.bounds) {
+            scratch.cacheDisplay(in: scratch.bounds, to: rep) // fonts, icons, drawing paths
+        }
+        _ = OverlayPanel() // never shown: a panel is only ever used fresh, see open()
+        DispatchQueue.global(qos: .utility).async {
+            for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
+                _ = AppIcons.icon(forPID: app.processIdentifier)
+            }
+        }
+    }
+
     /// Mouse selection. Hovering moves the highlight, clicking takes it.
     private func point(atTile tile: Int, icon: Int?, commit shouldCommit: Bool) {
         guard isOpen, model.point(atTile: tile, icon: icon) else { return }
@@ -137,14 +173,31 @@ final class SwitcherController {
         if shouldCommit { commit() }
     }
 
-    func open(backwards: Bool) {
-        let current = WindowActions.focusedWindowID()
-        if let current = current { mru.record(current) }
+    /// How long opening waits for apps to answer AX before going with their last answers.
+    /// Apps normally answer in a millisecond or two, 16ms at worst in measurement, while a busy
+    /// or napping one can take the full 200ms AX timeout, which is what sometimes held the
+    /// switcher back by a noticeable fraction of a second.
+    static let axBudget: TimeInterval = 0.03
 
-        let tiles = WindowLister.buildTiles(sky, recency: { [mru] in mru.rank(of: $0) })
-        guard !tiles.isEmpty else { return }
+    func open(backwards: Bool, session: UInt64, timing: OpenTiming) {
+        gateSession = session
+        let started = Clock.now
+        let front = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let snapshot = WindowLister.snapshot(sky, wantKeyWindows: true, frontPID: front, budget: Self.axBudget)
+        // The window the user is in. Only trusted for "already there, do nothing" and for the
+        // history when it was asked for just now; an older answer can name a window that has
+        // since lost focus, and committing to the real one would then do nothing.
+        let current = snapshot.frontFocused
+        let currentIsFresh = snapshot.frontFocusedIsFresh
+        if currentIsFresh, let current = current { mru.record(current) }
+        let tiles = WindowLister.tiles(from: snapshot, recency: { [mru] in mru.rank(of: $0) })
+        let listed = Clock.now
+        guard !tiles.isEmpty else {
+            SwitcherGate.lower(ifSession: session)
+            return
+        }
 
-        openedAtWindow = current
+        openedAtWindow = currentIsFresh ? current : nil
         model = SwitcherModel(tiles: tiles, current: current, mru: mru, backwards: backwards)
 
         // A fresh panel every time, rather than nursing one along.
@@ -161,11 +214,22 @@ final class SwitcherController {
         generation += 1
         seedThumbnails()
         panel.present(tiles: model.tiles, selected: model.selected, desktopSelection: model.desktopSelection)
-        // One line per open. `winSpace` is the one that matters: anything other than "none"
-        // means the overlay has been tied to a single Space and will be invisible from the
-        // others, which is what the menu-not-appearing bug looked like.
-        log("open: \(tiles.count) tiles, sel \(model.selected + 1), win=\(panel.windowNumber), "
-            + "winSpace=\(sky.space(ofWindow: CGWindowID(panel.windowNumber)).map(String.init) ?? "none")")
+        let shown = Clock.now
+        // One line per open. `winSpace` matters for the menu-not-appearing bug: anything other
+        // than "none" means the overlay has been tied to a single Space and will be invisible
+        // from the others. The timings say where any delay came from, from the key going down:
+        // to the tap seeing it, to the main thread getting to it, listing windows, and drawing.
+        let keyToTap = timing.pressedAt.map { Clock.milliseconds(from: $0, to: timing.tappedAt) }
+        let total = (keyToTap ?? 0) + Clock.milliseconds(from: timing.tappedAt, to: shown)
+        let breakdown = String(format: "key %@, wait %.1f, windows %.1f, panel %.1f",
+                               keyToTap.map { String(format: "%.1f", $0) } ?? "?",
+                               Clock.milliseconds(from: timing.tappedAt, to: started),
+                               Clock.milliseconds(from: started, to: listed),
+                               Clock.milliseconds(from: listed, to: shown))
+        log("open: \(tiles.count) tiles, sel \(model.selected + 1), "
+            + String(format: "%@%.0fms (%@)", total > 50 ? "SLOW " : "", total, breakdown)
+            + (snapshot.lateApps.isEmpty ? "" : ", slow to answer: \(snapshot.lateApps.joined(separator: ", "))")
+            + ", winSpace=\(sky.space(ofWindow: CGWindowID(panel.windowNumber)).map(String.init) ?? "none")")
         loadThumbnails()
     }
 
@@ -262,12 +326,14 @@ final class SwitcherController {
         guard isOpen else { return }
         if verbose { log("cancelled, staying put") }
         isOpen = false
+        SwitcherGate.lower(ifSession: gateSession)
         panel.dismiss()
     }
 
     func commit() {
         guard isOpen else { return }
         isOpen = false
+        SwitcherGate.lower(ifSession: gateSession)
         panel.dismiss()
 
         guard model.selected < model.tiles.count else { return }

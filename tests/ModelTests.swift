@@ -33,8 +33,8 @@ func modelTests() {
         }
 
         test("both halves of a split view survive") {
-            let left = window(1, size: CGSize(width: 756, height: 982))
-            let right = window(2, size: CGSize(width: 700, height: 982))
+            let left = window(1, title: "Left", size: CGSize(width: 756, height: 982))
+            let right = window(2, title: "Right", size: CGSize(width: 700, height: 982))
             expectEqual(WindowLister.mainWindows(onFullscreenSpace: [left, right]).map(\.id), [1, 2])
         }
 
@@ -46,9 +46,39 @@ func modelTests() {
         }
 
         test("exactly 40% is kept") {
-            let main = window(1, size: CGSize(width: 100, height: 100))
-            let edge = window(2, size: CGSize(width: 40, height: 100))
+            let main = window(1, title: "a", size: CGSize(width: 100, height: 100))
+            let edge = window(2, title: "b", size: CGSize(width: 40, height: 100))
             expectEqual(WindowLister.mainWindows(onFullscreenSpace: [main, edge]).map(\.id), [1, 2])
+        }
+
+        test("Chrome's address-bar suggestions are not a second window, however long the list") {
+            // The real case: 41% of the area, so the area test alone let it through.
+            let main = window(15037, key: "chrome", title: "claude — ~", size: CGSize(width: 1512, height: 868))
+            let popup = window(15039, key: "chrome", title: "", size: CGSize(width: 1005, height: 538))
+            expectEqual(WindowLister.mainWindows(onFullscreenSpace: [main, popup]).map(\.id), [15037])
+        }
+
+        test("a tall untitled window beside a titled one of the same app is dropped") {
+            let main = window(1, key: "chrome", title: "Page", size: CGSize(width: 1512, height: 868))
+            let panel = window(2, key: "chrome", title: "", size: CGSize(width: 1500, height: 860))
+            expectEqual(WindowLister.mainWindows(onFullscreenSpace: [main, panel]).map(\.id), [1])
+        }
+
+        test("a short window is dropped even if it is wide enough to pass on area") {
+            let main = window(1, title: "Doc", size: CGSize(width: 1000, height: 1000))
+            let wide = window(2, title: "Bar", size: CGSize(width: 1000, height: 600))
+            expectEqual(WindowLister.mainWindows(onFullscreenSpace: [main, wide]).map(\.id), [1])
+        }
+
+        test("an app whose only window is untitled keeps it") {
+            let game = window(1, key: "game", title: "", size: CGSize(width: 1512, height: 982))
+            expectEqual(WindowLister.mainWindows(onFullscreenSpace: [game]).map(\.id), [1])
+        }
+
+        test("in split view, an untitled window of one app survives beside a titled one of another") {
+            let left = window(1, key: "untitled.app", title: "", size: CGSize(width: 756, height: 982))
+            let right = window(2, key: "chrome", title: "Page", size: CGSize(width: 756, height: 982))
+            expectEqual(WindowLister.mainWindows(onFullscreenSpace: [left, right]).map(\.id), [1, 2])
         }
 
         test("all zero-sized windows are kept rather than all dropped") {
@@ -190,6 +220,44 @@ func modelTests() {
                 1: [window(1, size: CGSize(width: 1200, height: 800)), window(2, size: CGSize(width: 131, height: 140))],
             ]
             expectEqual(WindowLister.cyclableWindows(spaces: [desktop(1)], bySpace: bySpace).map(\.id), [1, 2])
+        }
+    }
+
+    suite("Standing in for an app that is slow to answer") {
+        test("an old answer still vetoes the helper windows it knew about") {
+            let stale = WindowLister.AppAnswer(standard: [1], seenOnActiveSpace: [1, 2])
+            let vouched = WindowLister.vouched(byStale: stale, amongNow: [1, 2])
+            expectEqual(WindowLister.admission(of: 2, space: 5, activeSpace: 5, vouched: vouched, minimized: []), .skip)
+            expectEqual(WindowLister.admission(of: 1, space: 5, activeSpace: 5, vouched: vouched, minimized: []), .onSpace)
+        }
+
+        test("an old answer never hides a window opened since") {
+            let stale = WindowLister.AppAnswer(standard: [1], seenOnActiveSpace: [1, 2])
+            let vouched = WindowLister.vouched(byStale: stale, amongNow: [1, 2, 3])
+            expectEqual(WindowLister.admission(of: 3, space: 5, activeSpace: 5, vouched: vouched, minimized: []), .onSpace)
+        }
+
+        test("an empty old answer, from a timeout or a busy app, vetoes nothing at all") {
+            // The review's case: Chrome's last answer timed out, then a new window opened.
+            let timedOut = WindowLister.AppAnswer(standard: [], seenOnActiveSpace: [1, 2])
+            let vouched = WindowLister.vouched(byStale: timedOut, amongNow: [1, 2, 3])
+            for id: CGWindowID in [1, 2, 3] {
+                expectEqual(WindowLister.admission(of: id, space: 5, activeSpace: 5, vouched: vouched, minimized: []), .onSpace,
+                            "window \(id) was hidden")
+            }
+        }
+
+        test("an answer taken in the same look passes through unchanged") {
+            let fresh = WindowLister.AppAnswer(standard: [1], minimized: [7], seenOnActiveSpace: [1, 2])
+            expectEqual(WindowLister.vouched(byStale: fresh, amongNow: [1, 2]), [1])
+        }
+
+        test("an old answer from another Space vetoes nothing here it did not see") {
+            let stale = WindowLister.AppAnswer(standard: [7], seenOnActiveSpace: [7, 8])
+            let vouched = WindowLister.vouched(byStale: stale, amongNow: [1, 2])
+            for id: CGWindowID in [1, 2] {
+                expectEqual(WindowLister.admission(of: id, space: 5, activeSpace: 5, vouched: vouched, minimized: []), .onSpace)
+            }
         }
     }
 }

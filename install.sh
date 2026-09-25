@@ -54,6 +54,9 @@ else
     codesign --force --deep --sign - "$APP_DIR" >/dev/null 2>&1 || true
 fi
 
+# RunAtLoad starts it at every login, KeepAlive restarts it if it ever exits. ProcessType
+# Interactive matters for the switcher: left unset, launchd runs an agent as a throttled
+# background job, and the delay between a keypress and the agent acting on it grew with it.
 echo "==> Installing LaunchAgent"
 mkdir -p "$HOME/Library/LaunchAgents" "$LOG_DIR"
 cat > "$PLIST" <<PLISTEOF
@@ -68,6 +71,7 @@ cat > "$PLIST" <<PLISTEOF
     </array>
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><true/>
+    <key>ProcessType</key><string>Interactive</string>
     <key>StandardOutPath</key><string>$LOG_DIR/$LABEL.log</string>
     <key>StandardErrorPath</key><string>$LOG_DIR/$LABEL.log</string>
 </dict>

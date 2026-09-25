@@ -8,6 +8,9 @@
 #   ./test.sh --navigation
 #                       really switches Spaces for about a minute, to check every switch lands
 #                       on the window picked (needs two fullscreen windows of one app)
+#   ./test.sh --keys    types real Cmd+Tab and Escape into the installed agent, flashing the
+#                       switcher, and reports key-to-panel times from its log; ends with one
+#                       quick Cmd+Tab tap, which switches to the previous window as a real one does
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"

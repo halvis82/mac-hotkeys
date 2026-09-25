@@ -32,6 +32,7 @@ enum RunningApps {
         guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
         else { return }
         forget(pid: app.processIdentifier)
+        WindowLister.forgetAnswers(for: app.processIdentifier)
     }
 
     static func app(forPID pid: pid_t) -> NSRunningApplication? {
@@ -219,23 +220,168 @@ enum WindowLister {
     }
 
     /// Every switchable window, keyed by the Space it lives on. Windows with no Space at all
-    /// (minimized ones) come back under `nil`.
+    /// (minimized ones) come back under `nil`. Waits for every app to answer.
+    static func allWindows(_ sky: SkyLight, onlyPID: pid_t? = nil) -> [UInt64?: [WindowInfo]] {
+        snapshot(sky, onlyPID: onlyPID, wantKeyWindows: false, frontPID: nil, budget: nil).bySpace
+    }
+
+    /// What the switcher needs to know about the windows on the system, from one look.
+    struct Snapshot {
+        let bySpace: [UInt64?: [WindowInfo]]
+        let spaces: [SpaceInfo]
+        /// Each app's key window, for apps with a window on a desktop.
+        let keyWindows: Set<CGWindowID>
+        /// The focused window of `frontPID`, the window the user is in.
+        let frontFocused: CGWindowID?
+        /// Whether that came from a fresh answer rather than an app that was slow to answer.
+        let frontFocusedIsFresh: Bool
+        /// Apps that did not answer AX within the budget, whose last answers were used instead.
+        let lateApps: [String]
+    }
+
+    /// What one app told AX, and what was on screen to ask about when it did.
+    struct AppAnswer {
+        var standard: Set<CGWindowID> = []
+        var minimized: Set<CGWindowID> = []
+        var focused: CGWindowID?
+        /// The app's windows on the active Space at the time, which `standard` vouches among.
+        var seenOnActiveSpace: Set<CGWindowID> = []
+        /// When the question was asked, in mach ticks.
+        var askedAt: UInt64 = 0
+    }
+
+    /// Windows AX vouches for, from an answer that may be older than the windows now listed.
+    ///
+    /// AX can only veto windows it was asked about, so anything on the active Space that the
+    /// answer never saw is let through rather than hidden. For an answer taken as part of the
+    /// same look this adds nothing.
+    ///
+    /// An answer vouching for nothing carries no information: the app timed out, was busy, or
+    /// has no standard windows. It stays empty, which vetoes nothing. Adding new windows to it
+    /// would turn it into a list of only those, and hide every older window of the app.
+    static func vouched(byStale answer: AppAnswer, amongNow current: Set<CGWindowID>) -> Set<CGWindowID> {
+        guard !answer.standard.isEmpty else { return [] }
+        return answer.standard.union(current.subtracting(answer.seenOnActiveSpace))
+    }
+
+    /// Every AX answer, and the questions still waiting on one, shared by every look.
+    ///
+    /// At most one question is ever out to an app. Apps in the background are put to sleep by
+    /// App Nap, and the first question after a quiet spell takes 10 to 65ms, sometimes the full
+    /// 200ms timeout, while the app wakes; after that they answer in a millisecond. Asking again
+    /// while one is outstanding only stacked threads up behind the sleeping app.
+    private final class Answers {
+        let condition = NSCondition()
+        var byPID: [pid_t: AppAnswer] = [:]
+        var askedAt: [pid_t: UInt64] = [:] // questions outstanding, and when asked
+        /// When Command last went down with the switcher closed, and when any other key was
+        /// pressed. Answers asked since the first and not before the second are fresh.
+        var warmedAt: UInt64 = 0
+        var invalidatedAt: UInt64 = 0
+    }
+    private static let answers = Answers()
+
+    struct Question {
+        var standard = false
+        var minimized = false
+        var onActiveSpace: Set<CGWindowID> = []
+    }
+
+    /// Asks `pid` unless a question asked since `freshSince` is already out.
+    private static func ask(_ pid: pid_t, _ question: Question, freshSince: UInt64) {
+        let store = answers
+        store.condition.lock()
+        let answeredFresh = (store.byPID[pid]?.askedAt ?? 0) >= freshSince
+        let askedFresh = (store.askedAt[pid] ?? 0) >= freshSince
+        if answeredFresh || askedFresh {
+            store.condition.unlock()
+            return
+        }
+        let askedAt = Clock.now
+        store.askedAt[pid] = askedAt
+        store.condition.unlock()
+
+        DispatchQueue.global(qos: .userInteractive).async {
+            let facts = axWindowFacts(ofPID: pid, standard: question.standard, minimized: question.minimized)
+            let answer = AppAnswer(standard: facts.standard,
+                                   minimized: facts.minimized,
+                                   focused: WindowActions.focusedWindowID(ofPID: pid),
+                                   seenOnActiveSpace: question.onActiveSpace,
+                                   askedAt: askedAt)
+            store.condition.lock()
+            // Not kept for an app that quit while being asked, which would undo `forgetAnswers`.
+            if kill(pid, 0) == 0, (store.byPID[pid]?.askedAt ?? 0) < askedAt { store.byPID[pid] = answer }
+            if store.askedAt[pid] == askedAt { store.askedAt[pid] = nil }
+            store.condition.broadcast()
+            store.condition.unlock()
+        }
+    }
+
+    /// Wakes the apps up while Command is going down, before Tab has been pressed.
+    ///
+    /// Called from the event tap whenever Command goes down with the switcher closed. The gap
+    /// between Command and Tab is usually a hundred milliseconds or more, which is time enough
+    /// for a napping app to wake and answer, so the answers are waiting when Tab arrives. Runs
+    /// the same look as an open, without waiting for anything and without drawing anything.
+    static func warm(_ sky: SkyLight) {
+        let store = answers
+        let now = Clock.now
+        store.condition.lock()
+        let recently = Clock.milliseconds(from: store.warmedAt, to: now) < 300 && store.warmedAt > store.invalidatedAt
+        if !recently { store.warmedAt = now }
+        store.condition.unlock()
+        guard !recently else { return }
+        DispatchQueue.global(qos: .userInteractive).async {
+            _ = snapshot(sky, wantKeyWindows: true, frontPID: KeyWindow.frontPID(), budget: 0)
+        }
+    }
+
+    /// Drops what an app said once it has quit, so a later app given the same pid starts clean.
+    static func forgetAnswers(for pid: pid_t) {
+        answers.condition.lock()
+        answers.byPID[pid] = nil
+        answers.condition.unlock()
+    }
+
+    /// Any key other than Tab, pressed with Command down, can change the windows: Cmd+N, Cmd+W,
+    /// Cmd+backtick. Answers asked before it are no longer taken as fresh.
+    static func invalidateAnswers() {
+        answers.condition.lock()
+        answers.invalidatedAt = Clock.now
+        answers.condition.unlock()
+    }
+
+    /// Every switchable window, the Spaces, and what AX says about the apps involved.
     ///
     /// This sits on the keystroke path, between Cmd+Tab and the switcher appearing, so it is
     /// arranged around what is slow. Asking LaunchServices about a pid is surprisingly costly
     /// and used to happen twice per window, around a hundred and fifty times per open, for a
     /// dozen or so distinct apps, so each app is looked up once. The AX questions go to each
-    /// app in parallel, because every one is a round trip into that app's process and asking
-    /// them in turn made the total the *sum* of every app's response time. One slow app used
-    /// to add its delay to everyone else's.
-    static func allWindows(_ sky: SkyLight, onlyPID: pid_t? = nil) -> [UInt64?: [WindowInfo]] {
+    /// app in parallel, one job per app asking everything needed of it, because every one is a
+    /// round trip into that app's process: asking in turn made the total the *sum* of every
+    /// app's response time, and asking in rounds made it the sum of each round's slowest app.
+    ///
+    /// With a `budget`, apps get that long. An app that is busy, or napping, can take up to the
+    /// 200ms AX timeout to answer, and that was the switcher sometimes taking 300ms to appear.
+    /// An app that misses the budget is represented by its last answer, see `vouched(byStale:)`,
+    /// and its late answer is kept for next time.
+    static func snapshot(_ sky: SkyLight,
+                         onlyPID: pid_t? = nil,
+                         wantKeyWindows: Bool,
+                         frontPID: pid_t?,
+                         budget: TimeInterval?) -> Snapshot {
         let options: CGWindowListOption = [.optionAll, .excludeDesktopElements]
         // Read as NSDictionary rather than bridged to [[String: Any]]: bridging converts every
         // key of every window on the system up front, and most windows are thrown away after
         // reading one or two of them.
-        guard let list = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as NSArray? else { return [:] }
+        guard let list = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as NSArray? else {
+            return Snapshot(bySpace: [:], spaces: sky.orderedSpaces(), keyWindows: [], frontFocused: nil,
+                            frontFocusedIsFresh: false, lateApps: [])
+        }
 
         let activeSpace = sky.activeSpace
+        let spaces = sky.orderedSpaces()
+        let desktops = Set(spaces.filter { !$0.isFullscreen }.map(\.id))
         // Which Space each window is on, asked per Space rather than per window: 5 round trips
         // instead of one for each of 50 to 100 windows, most of them apps' hidden helpers on no
         // Space at all. Measured against `space(ofWindow:)` over every window on the system, 20
@@ -243,7 +389,7 @@ enum WindowLister {
         // only one the per-window query placed was Finder's desktop-icon window, which is not on
         // layer 0 and never gets here. A window on several Spaces is still asked about directly,
         // and the live tests re-check all of this every run.
-        let membership = sky.spaces(ofWindowsOn: sky.orderedSpaces().map(\.id))
+        let membership = sky.spaces(ofWindowsOn: spaces.map(\.id))
         func spaceOf(_ id: CGWindowID) -> UInt64? {
             guard let membership = membership else { return sky.space(ofWindow: id) }
             guard let spaces = membership[id] else { return nil }
@@ -253,6 +399,7 @@ enum WindowLister {
         struct AppFacts {
             let isRegular: Bool
             let bundleID: String?
+            let name: String?
         }
         struct Candidate {
             let entry: NSDictionary
@@ -262,8 +409,8 @@ enum WindowLister {
         }
         var apps: [pid_t: AppFacts] = [:]
         var candidates: [Candidate] = []
-        var needsStandard: Set<pid_t> = []
-        var needsMinimized: Set<pid_t> = []
+        var questions: [pid_t: Question] = [:]
+        var wantsFocus: Set<pid_t> = []
 
         for case let entry as NSDictionary in list {
             guard (entry[kCGWindowLayer] as? Int) == 0,
@@ -281,25 +428,68 @@ enum WindowLister {
             } else {
                 let running = RunningApps.app(forPID: pid)
                 app = AppFacts(isRegular: running?.activationPolicy == .regular,
-                               bundleID: running?.bundleIdentifier)
+                               bundleID: running?.bundleIdentifier,
+                               name: running?.localizedName)
                 apps[pid] = app
             }
             guard app.isRegular else { continue }
 
             let space = spaceOf(id)
+            var asked = questions[pid] ?? Question()
             if let space = space {
-                if space == activeSpace { needsStandard.insert(pid) }
+                if space == activeSpace {
+                    asked.standard = true
+                    asked.onActiveSpace.insert(id)
+                }
+                if desktops.contains(space) { wantsFocus.insert(pid) }
             } else {
-                needsMinimized.insert(pid)
+                asked.minimized = true
+                wantsFocus.insert(pid)
             }
+            questions[pid] = asked
             candidates.append(Candidate(entry: entry, id: id, pid: pid, space: space))
         }
+        if let frontPID = frontPID, questions[frontPID] == nil { questions[frontPID] = Question() }
 
-        let facts = axWindowFacts(standardFor: needsStandard, minimizedFor: needsMinimized)
+        // Answers asked since the last warm-up count as fresh, unless a key has been pressed
+        // since then that could have changed the windows. Otherwise only this look's own do.
+        let started = Clock.now
+        let store = answers
+        store.condition.lock()
+        let warmIsFresh = budget != nil && store.warmedAt > store.invalidatedAt
+            && Clock.milliseconds(from: store.warmedAt, to: started) < 1000
+        let freshSince = warmIsFresh ? store.warmedAt : started
+        store.condition.unlock()
+
+        for (pid, question) in questions { ask(pid, question, freshSince: freshSince) }
+
+        // Wait for every app to have a fresh answer, or for the budget to run out.
+        let deadline = budget.map { Date().addingTimeInterval($0) } ?? .distantFuture
+        store.condition.lock()
+        while questions.keys.contains(where: { (store.byPID[$0]?.askedAt ?? 0) < freshSince }),
+              store.condition.wait(until: deadline) {}
+        let known = store.byPID
+        store.condition.unlock()
+
+        // Old answers only stand in through the rules that keep them from hiding new windows,
+        // which change nothing for an answer taken during this look.
+        var late: [String] = []
+        var answers: [pid_t: AppAnswer] = [:]
+        for (pid, question) in questions {
+            guard var answer = known[pid] else {
+                late.append(apps[pid]?.name ?? "pid \(pid)")
+                continue
+            }
+            if answer.askedAt < freshSince { late.append(apps[pid]?.name ?? "pid \(pid)") }
+            // Minimized comes from AX alone. A window that has lost its Space since an older
+            // answer is more likely closed or hidden than minimized, and guessing would list it.
+            answer.standard = vouched(byStale: answer, amongNow: question.onActiveSpace)
+            answers[pid] = answer
+        }
 
         var result: [UInt64?: [WindowInfo]] = [:]
         for candidate in candidates {
-            let pidFacts = facts[candidate.pid]
+            let pidFacts = answers[candidate.pid]
             let verdict = admission(of: candidate.id,
                                     space: candidate.space,
                                     activeSpace: activeSpace,
@@ -323,7 +513,15 @@ enum WindowLister {
                                   isMinimized: verdict == .minimized)
             result[candidate.space, default: []].append(info)
         }
-        return result
+
+        let keyWindows = wantKeyWindows
+            ? Set(wantsFocus.union(frontPID.map { [$0] } ?? []).compactMap { answers[$0]?.focused })
+            : []
+        let front = frontPID.flatMap { answers[$0] }
+        return Snapshot(bySpace: result, spaces: spaces, keyWindows: keyWindows,
+                        frontFocused: front?.focused,
+                        frontFocusedIsFresh: (front?.askedAt ?? 0) >= freshSince,
+                        lateApps: late.sorted())
     }
 
     /// AX facts for several apps at once, each app asked on its own thread.
@@ -371,14 +569,30 @@ enum WindowLister {
     /// The windows on a fullscreen Space worth a tile, in the order given.
     ///
     /// A fullscreen Space holds one window, or two side by side in split view, and those fill
-    /// the screen. Apps still park helper windows there that are large enough to survive a fixed
-    /// size threshold (Chrome keeps a 941x458 one), so compare against the biggest window on the
-    /// Space instead of a fixed number. Both halves of a split view are comparable in area, so
-    /// they both survive.
+    /// the screen. Apps also park other windows there, so three tests, each of which has had to
+    /// catch something the others missed:
+    ///
+    /// - Area, at least 40% of the biggest window there. Chrome keeps a 941x458 helper around.
+    /// - Height, at least 70% of the tallest. Real fullscreen and split-view windows run the
+    ///   full height; popups do not. Chrome's address-bar suggestions are a separate window that
+    ///   grows with the list, and a long list made it 1005x538 beside a 1512x868 window: 41% of
+    ///   the area, enough to pass the first test and show up as a second Chrome window.
+    /// - A title, when the same app has a titled window on that Space. Popups and toolbars are
+    ///   untitled; the window they belong to is not. An untitled window alone is kept, since some
+    ///   apps do leave their main window untitled.
+    ///
+    /// Both halves of a split view are full height and comparable in area, so both survive.
     static func mainWindows(onFullscreenSpace windows: [WindowInfo]) -> [WindowInfo] {
         let largest = windows.map { $0.bounds.width * $0.bounds.height }.max() ?? 0
         guard largest > 0 else { return windows }
-        return windows.filter { $0.bounds.width * $0.bounds.height >= largest * 0.4 }
+        let tallest = windows.map(\.bounds.height).max() ?? 0
+        let isTitled = { (window: WindowInfo) in !window.title.trimmingCharacters(in: .whitespaces).isEmpty }
+        let appsWithTitledWindows = Set(windows.filter(isTitled).map(\.appKey))
+        return windows.filter { window in
+            window.bounds.width * window.bounds.height >= largest * 0.4
+                && window.bounds.height >= tallest * 0.7
+                && (isTitled(window) || !appsWithTitledWindows.contains(window.appKey))
+        }
     }
 
     /// Every switchable window of one app, filtered exactly as the switcher filters them.
@@ -411,17 +625,14 @@ enum WindowLister {
     static func buildTiles(_ sky: SkyLight,
                            recency: @escaping (CGWindowID) -> Int = { _ in Int.max },
                            preferKeyWindows: Bool = true) -> [Tile] {
-        let bySpace = allWindows(sky)
-        let spaces = sky.orderedSpaces()
-        guard preferKeyWindows else {
-            return assembleTiles(spaces: spaces, bySpace: bySpace, recency: recency)
-        }
-        // Only desktops collapse to one window per app, so only their apps need asking.
-        let desktops = Set(spaces.filter { !$0.isFullscreen }.map(\.id))
-        let pids = Set(bySpace.filter { $0.key.map(desktops.contains) ?? true }.flatMap { $0.value.map(\.pid) })
-        let keys = keyWindows(ofPIDs: pids)
-        return assembleTiles(spaces: spaces, bySpace: bySpace,
-                             recency: preferring(keyWindows: keys, over: recency))
+        let snapshot = self.snapshot(sky, wantKeyWindows: preferKeyWindows, frontPID: nil, budget: nil)
+        return tiles(from: snapshot, recency: recency)
+    }
+
+    /// The row for a snapshot: desktop apps stand as their key windows where known.
+    static func tiles(from snapshot: Snapshot, recency: @escaping (CGWindowID) -> Int) -> [Tile] {
+        assembleTiles(spaces: snapshot.spaces, bySpace: snapshot.bySpace,
+                      recency: preferring(keyWindows: snapshot.keyWindows, over: recency))
     }
 
     /// Recency with each app's key window ranked ahead of everything.
@@ -435,21 +646,6 @@ enum WindowLister {
     static func preferring(keyWindows: Set<CGWindowID>,
                            over recency: @escaping (CGWindowID) -> Int) -> (CGWindowID) -> Int {
         { keyWindows.contains($0) ? -1 : recency($0) }
-    }
-
-    /// The key window of each app, asked in parallel. AX answers this even for an app in the
-    /// background whose key window is on another Space.
-    static func keyWindows(ofPIDs pids: Set<pid_t>) -> Set<CGWindowID> {
-        let list = Array(pids)
-        guard !list.isEmpty else { return [] }
-        var answers = [CGWindowID?](repeating: nil, count: list.count)
-        answers.withUnsafeMutableBufferPointer { slots in
-            let slots = slots
-            DispatchQueue.concurrentPerform(iterations: list.count) { index in
-                slots[index] = WindowActions.focusedWindowID(ofPID: list[index])
-            }
-        }
-        return Set(answers.compactMap { $0 })
     }
 
     /// The pure half of `buildTiles`, which turns listed windows into the row.

@@ -98,12 +98,28 @@ private func hop(_ sky: SkyLight, to stop: Stop) -> Hop? {
     return result
 }
 
+/// The phantom-window rule, checked from wherever the screen is now: no fullscreen tile is an
+/// untitled window of an app that has a titled window on that Space. Chrome's address-bar
+/// suggestions showed up exactly like that, and only when looked at from another Space.
+private func checkNoPhantomTiles(_ sky: SkyLight) {
+    let tiles = WindowLister.buildTiles(sky)
+    var bySpace: [UInt64: [WindowInfo]] = [:]
+    for case .window(let space, let window) in tiles { bySpace[space.id, default: []].append(window) }
+    for (space, windows) in bySpace {
+        let titled = Set(windows.filter { !$0.title.trimmingCharacters(in: .whitespaces).isEmpty }.map(\.appKey))
+        for window in windows where window.title.trimmingCharacters(in: .whitespaces).isEmpty && titled.contains(window.appKey) {
+            fail("phantom tile on space \(space): \(window.appName) \(window.id), \(window.bounds.size)")
+        }
+    }
+}
+
 private func check(_ hop: Hop?, _ sky: SkyLight) {
     if screenIsLocked {
         print("\n❌ the screen locked during the run, so the rest of it means nothing. Unlock and run again.")
         exit(1)
     }
     guard let hop = hop else { fail("never settled"); return }
+    checkNoPhantomTiles(sky)
     let path = hop.path.map { "\($0.space)@\(Int($0.at * 1000))ms" }.joined(separator: " -> ")
     print("      path \(path), screen difference \(hop.difference.map { String(format: "%.1f", $0) } ?? "?")")
     expectEqual(hop.path.last?.space, hop.to.space.id, "ended on the wrong Space")

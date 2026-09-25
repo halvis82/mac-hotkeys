@@ -1,4 +1,5 @@
 import CoreGraphics
+import Foundation
 
 let dndKeyCode: Int64 = 178   // F6, the moon key, when Fn is not held
 let graveKeyCode: Int64 = 50  // `
@@ -79,5 +80,89 @@ func routeKey(type: CGEventType, code: Int64, flags: CGEventFlags, switcherOpen:
             return .select(position: position)
         }
         return .pass
+    }
+}
+
+/// Whether keys should go to the switcher, readable from the event tap's own thread.
+///
+/// Raised the instant Cmd+Tab is seen, before the switcher has actually opened on the main
+/// thread, and lowered the instant Command is let go. The keys in between (Escape, arrows, digits
+/// and the release itself) are then routed to the switcher in the order they were pressed,
+/// however busy the main thread is. Going by the controller's own `isOpen` instead left a gap: a
+/// quick tap whose release arrived before the open had run was let through uncounted, and the
+/// switcher then opened with nothing left to close it.
+///
+/// Only the tap raises it. Each raise starts a numbered session, and the main thread may lower
+/// it only for the session it is handling: its word arrives late, and a plain "lower" from an
+/// earlier session could otherwise land after the tap had raised it for the next Cmd+Tab, lose
+/// that session's release, and leave the switcher stuck open.
+enum SwitcherGate {
+    private static let lock = NSLock()
+    private static var active = false
+    private static var session: UInt64 = 0
+
+    static var isActive: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return active
+    }
+
+    /// From the tap: raises the gate, starting a new session unless one is under way. Returns it.
+    @discardableResult
+    static func raise() -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        if !active {
+            active = true
+            session &+= 1
+        }
+        return session
+    }
+
+    /// From the tap: Command is up, or Escape was pressed.
+    static func lower() {
+        lock.lock()
+        active = false
+        lock.unlock()
+    }
+
+    /// From the main thread: lowers it only if `session` is still the one under way.
+    static func lower(ifSession expected: UInt64) {
+        lock.lock()
+        if session == expected { active = false }
+        lock.unlock()
+    }
+}
+
+/// Monotonic time in mach ticks, and conversions, for timing the keystroke path.
+enum Clock {
+    private static let timebase: mach_timebase_info_data_t = {
+        var info = mach_timebase_info_data_t()
+        mach_timebase_info(&info)
+        return info
+    }()
+
+    static var now: UInt64 { mach_absolute_time() }
+
+    /// Milliseconds between two tick readings, zero if they are out of order.
+    static func milliseconds(from start: UInt64, to end: UInt64 = mach_absolute_time()) -> Double {
+        guard end > start else { return 0 }
+        return Double(end - start) * Double(timebase.numer) / Double(timebase.denom) / 1_000_000
+    }
+
+    /// A keyboard event's timestamp as mach ticks, or nil if it can't be made sense of.
+    ///
+    /// Documented as nanoseconds, delivered in practice as mach ticks on some systems, so it is
+    /// matched against both clocks and kept only if it lands within the last minute of one.
+    static func ticks(ofEventTimestamp timestamp: UInt64, now: UInt64 = mach_absolute_time()) -> UInt64? {
+        guard timestamp > 0 else { return nil }
+        let minuteInTicks = UInt64(60_000_000_000.0 * Double(timebase.denom) / Double(timebase.numer))
+        if timestamp <= now, now - timestamp < minuteInTicks { return timestamp }
+        let nowNanoseconds = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        if timestamp <= nowNanoseconds, nowNanoseconds - timestamp < 60_000_000_000 {
+            let ageTicks = UInt64(Double(nowNanoseconds - timestamp) * Double(timebase.denom) / Double(timebase.numer))
+            return now > ageTicks ? now - ageTicks : nil
+        }
+        return nil
     }
 }

@@ -96,4 +96,72 @@ func keyRoutingTests() {
             expectEqual(all.filter { !$0.swallows }, [.pass, .commit])
         }
     }
+
+    suite("Keystroke timing and the switcher gate") {
+        test("milliseconds between tick readings, and zero when out of order") {
+            let start = Clock.now
+            usleep(20_000)
+            let elapsed = Clock.milliseconds(from: start)
+            expect(elapsed >= 19 && elapsed < 200, "20ms sleep measured as \(elapsed)ms")
+            expectEqual(Clock.milliseconds(from: Clock.now + 1_000_000, to: Clock.now), 0)
+        }
+
+        test("an event timestamp in ticks is taken as is") {
+            let now = Clock.now
+            expectEqual(Clock.ticks(ofEventTimestamp: now - 1000, now: now), now - 1000)
+        }
+
+        test("an event timestamp in nanoseconds is converted to ticks") {
+            let now = Clock.now
+            let nanoseconds = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - 5_000_000 // 5ms ago
+            guard let ticks = Clock.ticks(ofEventTimestamp: nanoseconds, now: now) else {
+                // On Intel, ticks are nanoseconds and the first branch already took it.
+                return
+            }
+            let age = Clock.milliseconds(from: ticks, to: now)
+            expect(age > 3 && age < 50, "5ms-old event came out \(age)ms old")
+        }
+
+        test("a missing or nonsense timestamp is dropped rather than logged as a huge delay") {
+            expect(Clock.ticks(ofEventTimestamp: 0) == nil)
+            expect(Clock.ticks(ofEventTimestamp: Clock.now + 10_000_000_000) == nil)
+        }
+
+        test("the gate is readable from another thread as soon as it is raised") {
+            SwitcherGate.raise()
+            var seen = false
+            let done = DispatchSemaphore(value: 0)
+            DispatchQueue.global().async { seen = SwitcherGate.isActive; done.signal() }
+            done.wait()
+            expect(seen)
+            SwitcherGate.lower()
+            expect(!SwitcherGate.isActive)
+        }
+
+        test("keys go to the switcher while the gate is up, even before the switcher has opened") {
+            // A quick Cmd+Tab: Tab raises the gate, and the release must commit, not pass.
+            SwitcherGate.raise()
+            expectEqual(routeKey(type: .flagsChanged, code: 55, flags: [], switcherOpen: SwitcherGate.isActive), .commit)
+            expectEqual(routeKey(type: .keyDown, code: escKeyCode, flags: .maskCommand, switcherOpen: SwitcherGate.isActive), .cancel)
+            SwitcherGate.lower()
+        }
+
+        test("a late close from an earlier session cannot lower the gate for the next one") {
+            // The review's case: open, release, Cmd+Tab again, all before the main thread catches up.
+            let first = SwitcherGate.raise()
+            SwitcherGate.lower()                    // tap: first release
+            let second = SwitcherGate.raise()       // tap: next Cmd+Tab
+            expect(second != first)
+            SwitcherGate.lower(ifSession: first)    // main: the first session's commit, arriving late
+            expect(SwitcherGate.isActive, "the second session's gate was lowered by the first")
+            SwitcherGate.lower(ifSession: second)
+            expect(!SwitcherGate.isActive)
+        }
+
+        test("raising while a session is under way keeps that session") {
+            let session = SwitcherGate.raise()
+            expectEqual(SwitcherGate.raise(), session, "Tab pressed again while open must not start a new session")
+            SwitcherGate.lower()
+        }
+    }
 }

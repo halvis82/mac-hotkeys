@@ -24,6 +24,7 @@ enum KeyWindow {
     private typealias GetProcessForPIDFn =
         @convention(c) (pid_t, UnsafeMutablePointer<ProcessSerialNumber>) -> OSStatus
     private typealias GetFrontProcessFn = @convention(c) (UnsafeMutablePointer<ProcessSerialNumber>) -> CGError
+    private typealias GetProcessPIDFn = @convention(c) (UnsafePointer<ProcessSerialNumber>, UnsafeMutablePointer<pid_t>) -> OSStatus
 
     private struct Calls {
         let setFrontProcess: SetFrontProcessFn
@@ -66,6 +67,23 @@ enum KeyWindow {
               calls.getProcessForPID(pid, &wanted) == noErr
         else { return nil }
         return front.highLongOfPSN == wanted.highLongOfPSN && front.lowLongOfPSN == wanted.lowLongOfPSN
+    }
+
+    /// The app the window server has in front, readable from any thread, which AppKit's
+    /// `frontmostApplication` is not meant to be.
+    ///
+    /// Resolved on its own, so that losing this one symbol only costs the warm-up its frontmost
+    /// app, never the direct route.
+    private static let getProcessPID: GetProcessPIDFn? =
+        dlsym(UnsafeMutableRawPointer(bitPattern: -2), "GetProcessPID").map { unsafeBitCast($0, to: GetProcessPIDFn.self) }
+
+    static func frontPID() -> pid_t? {
+        guard let calls = calls, let getProcessPID = getProcessPID else { return nil }
+        var front = ProcessSerialNumber()
+        var pid: pid_t = 0
+        guard calls.getFrontProcess(&front) == .success, getProcessPID(&front, &pid) == noErr, pid > 0
+        else { return nil }
+        return pid
     }
 
     /// True if every call succeeded. The app ends up frontmost; see the note above.
