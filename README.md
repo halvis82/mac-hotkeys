@@ -55,12 +55,17 @@ rm /tmp/k.pem /tmp/c.cer /tmp/id.p12
 
 ## Setting up the moon key
 
-Tapping the moon key runs a shortcut called **Moon Key Tap**, and holding it runs **Moon Key
-Hold**. If a Focus mode is already on, either one runs **Moon Key Off** instead. Make those
-three in the Shortcuts app, with whatever actions you want, for example Do Not Disturb on, some
-other Focus mode on, and Focus off.
+The moon key turns Focus modes on and off through three shortcuts you make in the Shortcuts app,
+each with a single **Set Focus** action:
 
-Until they exist, the moon key works as normal.
+| Shortcut | What it should do | Runs when |
+|---|---|---|
+| **Moon Key Tap** | turn a Focus mode on, e.g. Do Not Disturb | tapped, with no Focus on |
+| **Moon Key Hold** | turn another Focus mode on | held, with no Focus on |
+| **Moon Key Off** | turn Focus off, not tied to one mode, so it clears whichever is on | tapped or held, with a Focus on |
+
+It works this way because macOS only lets apps change Focus through Shortcuts. Until all three
+exist, the moon key works as normal.
 
 ## More
 
